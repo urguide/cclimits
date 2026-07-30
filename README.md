@@ -1,6 +1,6 @@
 # cclimits
 
-[![CI](https://github.com/cruzanstx/cclimits/actions/workflows/ci.yml/badge.svg)](https://github.com/cruzanstx/cclimits/actions/workflows/ci.yml)
+[![CI](https://github.com/urguide/cclimits/actions/workflows/ci.yml/badge.svg)](https://github.com/urguide/cclimits/actions/workflows/ci.yml)
 
 Check quota/usage for AI coding CLI tools: Claude Code, OpenAI Codex, Google Gemini CLI, Google Antigravity, Z.AI, OpenRouter, Kimi K2 (Moonshot AI), and Synthetic.new. It also supports checking keys used by **Aider** and **Continue**.
 
@@ -14,29 +14,30 @@ Check quota/usage for AI coding CLI tools: Claude Code, OpenAI Codex, Google Gem
 
 ## Installation
 
-### Via npm (recommended)
+**Requires**: Python 3.9+ installed on your system.
+
+### Download (recommended)
 
 ```bash
-# Run directly without installing
-npx cclimits
-
-# Or install globally
-npm install -g cclimits
-cclimits
+curl -o ~/.local/bin/cclimits https://raw.githubusercontent.com/urguide/cclimits/main/lib/cclimits.py
+chmod +x ~/.local/bin/cclimits
 ```
 
-**Requires**: Python 3.9+ installed on your system.
+Optionally add the tmux status-line wrapper (see [tmux Integration](#tmux-integration)):
+
+```bash
+curl -o ~/.local/bin/cclimits-tmux https://raw.githubusercontent.com/urguide/cclimits/main/bin/cclimits-tmux
+chmod +x ~/.local/bin/cclimits-tmux
+```
+
+Make sure `~/.local/bin` is on your `PATH`.
 
 ### Via Git
 
 ```bash
-# Clone and symlink
-git clone https://github.com/cruzanstx/cclimits.git
+git clone https://github.com/urguide/cclimits.git
 ln -s $(pwd)/cclimits/lib/cclimits.py ~/.local/bin/cclimits
-
-# Or just download
-curl -o ~/.local/bin/cclimits https://raw.githubusercontent.com/cruzanstx/cclimits/main/lib/cclimits.py
-chmod +x ~/.local/bin/cclimits
+ln -s $(pwd)/cclimits/bin/cclimits-tmux ~/.local/bin/cclimits-tmux
 ```
 
 ## Usage
@@ -221,6 +222,67 @@ Status icons: ✅ ok · ⚠️ high usage · ❌ error · 🔑 no credentials fo
 | 🔴 | 90-100% - near limit |
 | ❌ | 100% or unavailable |
 
+## tmux Integration
+
+`bin/cclimits-tmux` shows your usage in the tmux status line — on the same row as
+your window tabs.
+
+tmux runs `#(...)` **synchronously**, so calling `cclimits` directly freezes the
+whole status line while it waits on the API (~0.6s). The wrapper avoids this: it
+prints the cached value instantly and refreshes in the background only when the
+cache is stale.
+
+Add to `~/.tmux.conf`:
+
+```tmux
+set -g status-right-length 150
+set -g status-right '#[fg=cyan]#(~/.local/bin/cclimits-tmux)'
+```
+
+Reload with `tmux source-file ~/.tmux.conf`. Result in the top/bottom right:
+
+```
+Claude: 4.0% (5h) ✅ | Codex: 38% (7d) ✅
+```
+
+To keep an existing status-right (e.g. [gitmux](https://github.com/arl/gitmux)),
+put both in one option — tmux only honours the last `status-right` it reads:
+
+```tmux
+set -g status-right '#[fg=cyan]#(~/.local/bin/cclimits-tmux)#[fg=default,bg=default]  #(gitmux "#{pane_current_path}")'
+```
+
+### Configuration
+
+Override via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CCLIMITS_TMUX_TTL` | `180` | Seconds before the cache is refreshed |
+| `CCLIMITS_TMUX_ARGS` | `--claude --codex --oneline` | Arguments passed to `cclimits` |
+| `CCLIMITS_BIN` | auto-detected | Path to the `cclimits` executable |
+
+```tmux
+# Refresh every 60s, show all providers with reset countdowns
+set -g status-right '#(CCLIMITS_TMUX_TTL=60 CCLIMITS_TMUX_ARGS="--oneline both --resets" ~/.local/bin/cclimits-tmux)'
+```
+
+`cclimits` is resolved in this order: `$CCLIMITS_BIN`, then a sibling
+`../lib/cclimits.py` (when run from a git checkout), then `PATH`.
+
+### Notes
+
+- `status-interval` (default 15s) controls how often tmux *reads* the cache;
+  `CCLIMITS_TMUX_TTL` controls how often the API is actually queried. Leaving
+  `status-interval` low is cheap — a cache hit is just a file read.
+- The cache lives in `${TMPDIR:-/tmp}/cclimits-tmux.<uid>.<args-hash>.cache` and
+  is keyed on the argument list, so different views never serve each other's
+  output. Concurrent panes are de-duplicated with `flock`.
+- On a cold cache the first render is empty; the value appears on the next
+  status refresh.
+- The wrapper calls `cclimits` without `--cached`, so no `(cached 42s)` suffix
+  appears in the status line.
+
 ## Credential Locations
 
 Credentials are auto-discovered from these locations:
@@ -282,6 +344,7 @@ export GEMINI_OAUTH_CLIENT_SECRET="..."
 
 - Python 3.9+
 - `requests` library (optional, falls back to urllib)
+- `bash`, `flock` (only for `cclimits-tmux`)
 
 ## License
 
