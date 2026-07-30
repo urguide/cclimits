@@ -1,0 +1,55 @@
+#!/bin/bash
+# Non-blocking tmux status-line wrapper for cclimits.
+#
+# tmux runs #(...) synchronously, so a slow command freezes the whole status
+# line. This prints the cached result instantly (zero latency) and refreshes
+# it in the background only when older than TTL seconds.
+#
+# Usage in ~/.tmux.conf:
+#   set -g status-right-length 150
+#   set -g status-right '#[fg=cyan]#(/path/to/cclimits-tmux)'
+#
+# Environment overrides:
+#   CCLIMITS_TMUX_TTL    refresh interval in seconds (default: 180)
+#   CCLIMITS_TMUX_ARGS   cclimits arguments (default: --claude --codex --oneline)
+#   CCLIMITS_BIN         path to the cclimits executable
+
+set -u
+
+TTL=${CCLIMITS_TMUX_TTL:-180}
+ARGS=${CCLIMITS_TMUX_ARGS:---claude --codex --oneline}
+# Key the cache on the argument list so different views (e.g. --claude only
+# vs --claude --codex) never serve each other's output.
+ARGS_KEY=$(printf '%s' "$ARGS" | cksum | cut -d' ' -f1)
+CACHE="${TMPDIR:-/tmp}/cclimits-tmux.$(id -u).$ARGS_KEY.cache"
+
+# Resolve cclimits: explicit override, then the repo checkout this script
+# lives in, then PATH.
+if [ -n "${CCLIMITS_BIN:-}" ]; then
+  CMD=("$CCLIMITS_BIN")
+else
+  self_dir=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+  if [ -f "$self_dir/../lib/cclimits.py" ]; then
+    CMD=(python3 "$self_dir/../lib/cclimits.py")
+  else
+    CMD=(cclimits)
+  fi
+fi
+
+# Serve the cached value immediately.
+[ -f "$CACHE" ] && cat -- "$CACHE"
+
+# Refresh in the background if the cache is missing or stale.
+if [ ! -f "$CACHE" ] || [ $(( $(date +%s) - $(stat -c %Y -- "$CACHE") )) -ge "$TTL" ]; then
+  (
+    flock -n 9 || exit 0
+    # shellcheck disable=SC2086  # ARGS is an intentional word-split option list
+    if "${CMD[@]}" $ARGS >"$CACHE.tmp" 2>/dev/null; then
+      mv -- "$CACHE.tmp" "$CACHE"
+    else
+      rm -f -- "$CACHE.tmp"
+    fi
+  ) 9>"$CACHE.lock" >/dev/null 2>&1 &
+fi
+
+exit 0

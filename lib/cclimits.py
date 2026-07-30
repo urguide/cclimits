@@ -766,10 +766,23 @@ def get_gemini_credentials() -> dict | None:
                             oauth_data["access_token"] = new_tokens["access_token"]
                             oauth_data["expiry_date"] = new_expiry_ms
                             
-                            # Atomic write pattern to avoid corruption
+                            # Atomic write pattern to avoid corruption.
+                            # Create the temp file 0600 via os.open so the
+                            # token never touches disk world-readable (a
+                            # write_text() + chmod() leaves a window, and
+                            # umask would otherwise decide the mode).
                             temp_path = oauth_path.with_suffix(".tmp")
-                            temp_path.write_text(json.dumps(oauth_data, indent=2))
-                            temp_path.rename(oauth_path)
+                            fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                            try:
+                                with os.fdopen(fd, "w") as f:
+                                    json.dump(oauth_data, f, indent=2)
+                            except BaseException:
+                                temp_path.unlink(missing_ok=True)
+                                raise
+                            # O_CREAT honors the mode only for a *new* file;
+                            # enforce 0600 in case the temp file pre-existed.
+                            os.chmod(temp_path, 0o600)
+                            os.replace(temp_path, oauth_path)
                         except Exception as e:
                             # Log warning but continue - in-memory token still works
                             print(f"Warning: Could not save refreshed OAuth token: {e}")
