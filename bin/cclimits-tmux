@@ -9,6 +9,12 @@
 #   set -g status-right-length 150
 #   set -g status-right '#[fg=cyan]#(/path/to/cclimits-tmux)'
 #
+# A failed lookup (e.g. HTTP 429 from a shared rate limit) must never clobber
+# a good cached reading, and must not make every pane retry immediately.  So
+# the refresh interval is keyed on a "lease" file stamped when a lookup
+# *starts*, not on the cache mtime: one pane claims the lease, the rest stay
+# quiet for TTL seconds whether or not that lookup succeeded.
+#
 # Environment overrides:
 #   CCLIMITS_TMUX_TTL    refresh interval in seconds (default: 180)
 #   CCLIMITS_TMUX_ARGS   cclimits arguments (default: --claude --codex --oneline both --compact)
@@ -22,6 +28,7 @@ ARGS=${CCLIMITS_TMUX_ARGS:---claude --codex --oneline both --compact}
 # vs --claude --codex) never serve each other's output.
 ARGS_KEY=$(printf '%s' "$ARGS" | cksum | cut -d' ' -f1)
 CACHE="${TMPDIR:-/tmp}/cclimits-tmux.$(id -u).$ARGS_KEY.cache"
+LEASE="$CACHE.lease"
 
 # Resolve cclimits: explicit override, then the repo checkout this script
 # lives in, then PATH.
@@ -39,16 +46,31 @@ fi
 # Serve the cached value immediately.
 [ -f "$CACHE" ] && cat -- "$CACHE"
 
-# Refresh in the background if the cache is missing or stale.
-if [ ! -f "$CACHE" ] || [ $(( $(date +%s) - $(stat -c %Y -- "$CACHE") )) -ge "$TTL" ]; then
+# Refresh only if no lookup has been attempted within the last TTL seconds.
+if [ ! -f "$LEASE" ] || [ $(( $(date +%s) - $(stat -c %Y -- "$LEASE") )) -ge "$TTL" ]; then
   (
     flock -n 9 || exit 0
+    # Claim the lease before querying so panes starting up in parallel back
+    # off immediately instead of all firing at the rate-limited endpoint.
+    : >"$LEASE"
+
     # shellcheck disable=SC2086  # ARGS is an intentional word-split option list
-    if "${CMD[@]}" $ARGS >"$CACHE.tmp" 2>/dev/null; then
-      mv -- "$CACHE.tmp" "$CACHE"
-    else
+    if ! "${CMD[@]}" $ARGS >"$CACHE.tmp" 2>/dev/null; then
       rm -f -- "$CACHE.tmp"
+      exit 0
     fi
+
+    # cclimits exits 0 even when a provider lookup fails, marking the entry
+    # with a failure icon instead.  Treat such output as a failure so a
+    # transient outage never overwrites a good reading.
+    if [ ! -s "$CACHE.tmp" ] || grep -qE '❌|🔑|⏰|ERR' -- "$CACHE.tmp"; then
+      # No prior reading to protect: show the failure rather than nothing.
+      [ -s "$CACHE" ] || mv -- "$CACHE.tmp" "$CACHE"
+      rm -f -- "$CACHE.tmp"
+      exit 0
+    fi
+
+    mv -- "$CACHE.tmp" "$CACHE"
   ) 9>"$CACHE.lock" >/dev/null 2>&1 &
 fi
 
