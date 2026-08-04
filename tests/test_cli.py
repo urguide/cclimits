@@ -235,6 +235,20 @@ class TestOnelineOutput:
 
     @patch('cclimits.get_claude_usage')
     @patch('cclimits.get_codex_usage')
+    @patch('sys.argv', ['cclimits', '--claude', '--codex', '--oneline', 'both', '--compact'])
+    def test_oneline_compact_flag(self, mock_codex, mock_claude, capsys):
+        """--compact emits integer percentages without status decoration."""
+        mock_claude.return_value = {
+            "status": "ok",
+            "five_hour": {"used": "3.0%"},
+            "seven_day": {"used": "42.4%"},
+        }
+        mock_codex.return_value = {"status": "ok", "secondary_window": {"used": "37%"}}
+        main()
+        assert capsys.readouterr().out == "Claude: 3%/42% | Codex: 37%\n"
+
+    @patch('cclimits.get_claude_usage')
+    @patch('cclimits.get_codex_usage')
     @patch('sys.argv', ['cclimits', '--oneline', '5h'])
     def test_oneline_explicit_5h_window(self, mock_codex, mock_claude, capsys):
         """Test --oneline 5h explicitly."""

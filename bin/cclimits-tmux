@@ -11,13 +11,13 @@
 #
 # Environment overrides:
 #   CCLIMITS_TMUX_TTL    refresh interval in seconds (default: 180)
-#   CCLIMITS_TMUX_ARGS   cclimits arguments (default: --claude --codex --oneline)
+#   CCLIMITS_TMUX_ARGS   cclimits arguments (default: --claude --codex --oneline both --compact)
 #   CCLIMITS_BIN         path to the cclimits executable
 
 set -u
 
 TTL=${CCLIMITS_TMUX_TTL:-180}
-ARGS=${CCLIMITS_TMUX_ARGS:---claude --codex --oneline}
+ARGS=${CCLIMITS_TMUX_ARGS:---claude --codex --oneline both --compact}
 # Key the cache on the argument list so different views (e.g. --claude only
 # vs --claude --codex) never serve each other's output.
 ARGS_KEY=$(printf '%s' "$ARGS" | cksum | cut -d' ' -f1)

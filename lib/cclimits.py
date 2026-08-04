@@ -8,6 +8,7 @@ Kimi, Google Antigravity, and Synthetic.new
 from __future__ import annotations
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -1798,6 +1799,15 @@ def _fmt_balance(label, balance_str, balance, use_color):
     return f"{label}: {balance_str} {'❌' if balance <= 0 else '🔴' if balance < 1.0 else '⚠️' if balance < 5.0 else '✅'}"
 
 
+def _compact_oneline(rendered: str) -> str:
+    """Remove status decoration and round percentages for tight status lines."""
+    rendered = re.sub(r"(\d+(?:\.\d+)?)%", lambda m: f"{round(float(m.group(1)))}%", rendered)
+    rendered = re.sub(r" \((?:5h|7d)\)", "", rendered)
+    for icon in (" ✅", " ⚠️", " 🔴", " ❌"):
+        rendered = rendered.replace(icon, "")
+    return rendered.rstrip()
+
+
 # Per-provider oneline renderers
 
 def _make_str_pct_renderer(label, ok_check, w5_key, w7d_key):
@@ -1947,7 +1957,7 @@ PROVIDERS = [
 
 
 def print_oneline(results: dict, window: str = "5h", use_color: bool = False, cache_age: int | None = None,
-                  show_resets: bool = False):
+                  show_resets: bool = False, compact: bool = False):
     """Print compact one-liner output"""
     if window not in ("5h", "7d", "both"):
         window = "5h"
@@ -1972,6 +1982,8 @@ def print_oneline(results: dict, window: str = "5h", use_color: bool = False, ca
         data = results[key]
         rendered = p["render_oneline"](data, window, use_color, show_resets)
         if rendered is not None:
+            if compact:
+                rendered = _compact_oneline(rendered)
             if "stale_fallback" in data:
                 age = data.get("stale_age_seconds", 0)
                 tag = f"(stale {format_cache_age(age)})"
@@ -2041,6 +2053,8 @@ Example Output:
                         help="Use colored text instead of emojis (for terminals without emoji support)")
     parser.add_argument("--resets", "--timeremaining", action="store_true", dest="resets",
                         help="Append reset countdowns (↻2h15m) to --oneline output")
+    parser.add_argument("--compact", action="store_true",
+                        help="Compact --oneline output: integer percentages, no window labels or status icons")
     for _p in PROVIDERS:
         parser.add_argument(f"--{_p['key']}", action="store_true", help=_p["arg_help"])
     parser.add_argument("--cached", action="store_true", help="Use cached data if fresh (< TTL), fetch if stale")
@@ -2131,7 +2145,8 @@ Example Output:
         print(json.dumps(results, indent=2))
     elif args.oneline:
         window = args.oneline if args.oneline in ("5h", "7d", "both") else "5h"
-        print_oneline(results, window, use_color=args.noemoji, cache_age=cache_age, show_resets=args.resets)
+        print_oneline(results, window, use_color=args.noemoji, cache_age=cache_age,
+                      show_resets=args.resets, compact=args.compact)
     else:
         print("\n🔍 AI CLI Usage Checker")
         cached_note = f"  (cached {format_cache_age(cache_age)} ago)" if cache_age is not None else ""

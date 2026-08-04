@@ -548,6 +548,29 @@ class TestPrintOnelineEdgeCases:
         assert "Claude: 45.5% (5h)" in captured.out
 
 
+class TestOnelineCompact:
+    """Compact mode is optimized for narrow tmux status lines."""
+
+    def test_both_windows_are_integer_without_icons_or_labels(self, capsys):
+        results = {
+            "claude": {
+                "status": "ok",
+                "five_hour": {"used": "3.0%"},
+                "seven_day": {"used": "42.4%"},
+            },
+            "codex": {
+                "status": "ok",
+                "secondary_window": {"used": "37%"},
+            },
+        }
+        print_oneline(results, "both", compact=True)
+        assert capsys.readouterr().out == "Claude: 3%/42% | Codex: 37%\n"
+
+    def test_errors_remain_visible(self, capsys):
+        print_oneline({"claude": {"error": "Token expired"}}, "both", compact=True)
+        assert capsys.readouterr().out == "Claude: ⏰\n"
+
+
 class TestOnelineSingleWindowDegradation:
     """A provider that exposes only one window still renders in every mode,
     labeled by the window it actually has (Codex weekly-only case)."""

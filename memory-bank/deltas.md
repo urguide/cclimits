@@ -1,5 +1,12 @@
 # Recent Deltas (Last 3-5 Changes)
 
+## 2026-08-04: Compact Oneline Output for tmux
+
+- Added `--compact` for narrow status lines: percentages are rounded to integers, `(5h)` / `(7d)` labels and successful-status icons are omitted, while authentication/API errors remain visible.
+- The tmux wrapper now defaults to `--claude --codex --oneline both --compact`, producing output such as `Claude: 3%/42% | Codex: 37%`.
+- Added output and CLI regression tests and updated the README tmux defaults.
+- Files: `lib/cclimits.py`, `bin/cclimits-tmux`, `tests/test_output.py`, `tests/test_cli.py`, `README.md`, `memory-bank/deltas.md`, `memory-bank/progress.md`
+
 ## 2026-07-24: Z.AI Peak/Off-Peak Quota-Rate Indicator
 
 - **Feature**: Z.AI's peak window (14:00–18:00 UTC+8 = 06:00–10:00 UTC) and quota multiplier are computed **client-side** by `zai_quota_rate(now=None)` — no API endpoint exposes them. GLM-5.2/5-Turbo burn 3× quota at peak, 2× off-peak (promo: 1× through `ZAI_OFFPEAK_PROMO_END = 2026-09-30`; constant must be dropped/updated after that).

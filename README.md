@@ -56,6 +56,7 @@ cclimits --json       # JSON output
 cclimits --oneline           # Compact one-liner (5h window)
 cclimits --oneline 7d        # Compact one-liner (7d window)
 cclimits --oneline both      # Compact one-liner (5h/7d combined)
+cclimits --oneline both --compact # Integer percentages without labels/icons
 cclimits --oneline --noemoji # Color-coded text instead of emojis
 cclimits --oneline --resets  # Append reset countdowns (alias: --timeremaining)
 
@@ -74,6 +75,9 @@ Claude: 4.0% (5h) ✅ | Codex: 0% (5h) ✅ | Z.AI: 1% (5h) ✅ | Gemini: ( 3-Fla
 
 # Both windows (--oneline both) - shows 5h/7d combined (Z.AI: 5h-tokens%/monthly-MCP-tools%)
 Claude: 4.0%/10.0% ✅ | Codex: 0%/2% ✅ | Z.AI: 1%/16% ✅ | OpenRouter: $47.91 ✅
+
+# Compact tmux-friendly output (--oneline both --compact)
+Claude: 4%/10% | Codex: 2%
 
 # During Z.AI peak hours (06:00-10:00 UTC) a ⚡3x quota-rate marker appears
 Z.AI: 1% (5h) ✅ ⚡3x
@@ -259,7 +263,7 @@ Override via environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CCLIMITS_TMUX_TTL` | `180` | Seconds before the cache is refreshed |
-| `CCLIMITS_TMUX_ARGS` | `--claude --codex --oneline` | Arguments passed to `cclimits` |
+| `CCLIMITS_TMUX_ARGS` | `--claude --codex --oneline both --compact` | Arguments passed to `cclimits` |
 | `CCLIMITS_BIN` | auto-detected | Path to the `cclimits` executable |
 
 ```tmux
