@@ -117,6 +117,25 @@ There are two paths:
 | Kimi (Moonshot) | `api.moonshot.ai/v1/users/me/balance` | `Authorization: Bearer {api_key}` |
 | Synthetic.new | `api.synthetic.new/v2/quotas` | `Authorization: Bearer {api_key}` |
 
+### Token Refresh Endpoints
+
+| Tool | Endpoint | Notes |
+|------|----------|-------|
+| Claude | `platform.claude.com/v1/oauth/token` | JSON body + `anthropic-beta: oauth-2025-04-20`; refresh token **is** rotated (`refreshTokenExpiresAt` stays put, so it's not a rotation signal) |
+| Codex | `auth.openai.com/oauth/token` | JSON body; refresh token **is** rotated |
+| Gemini | `oauth2.googleapis.com/token` | form body, needs client id/secret from the Gemini CLI install |
+
+Both Claude and Codex rotate the refresh token, so write-back is mandatory —
+dropping the response strands the vendor CLI on a retired token.
+
+Refreshed tokens are written back to the vendor's own credential file via
+`write_json_secure()` (atomic, 0600) under `credential_lock()`. For Claude,
+`claude_refresh_lock()` additionally takes the CLI's own proper-lockfile
+directory `<config-dir>/.oauth_refresh.lock` (60s stale steal) so the two
+can't rotate concurrently. Tests must never touch the real files — the autouse
+`isolated_credentials` fixture in `tests/conftest.py` redirects
+`CLAUDE_CRED_PATHS` / `CODEX_AUTH_PATHS`.
+
 ## Testing Checklist
 
 Before publishing:
@@ -134,4 +153,6 @@ Before publishing:
 4. **Z.AI**: 5h shared quota across GLM-4.7, GLM-4.6, GLM-4.5V, GLM-4.5, GLM-4.5-Air, and Visual Analysis
 5. **Codex API key mode**: No quota info (only OAuth has it)
 6. **Synthetic.new**: Reports three buckets — subscription (period requests), rolling 5h tokens, and weekly $ credits. Calls to `/quotas` don't count against any bucket
-7. **Windows**: Untested, may have path issues
+7. **Windows**: Untested, may have path issues; `credential_lock()` degrades to no locking without `fcntl`
+8. **macOS Claude credentials**: Keychain-stored tokens are read-only — cclimits won't write a refreshed token back into the Keychain, so expiry there still reports as expired
+9. **Codex has no shared lock**: `credential_lock()` only serializes cclimits against itself, and codex exposes no lock file (just an in-process mutex), so a simultaneous codex refresh is still possible. Claude is covered by `claude_refresh_lock()`

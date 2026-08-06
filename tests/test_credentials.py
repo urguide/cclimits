@@ -2,17 +2,25 @@
 Tests for credential discovery functions.
 """
 
+import base64
 import json
 import os
+import stat
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock, mock_open
 import pytest
+import cclimits
 from cclimits import (
     get_claude_credentials,
     get_openai_credentials,
     get_gemini_oauth_creds,
     get_gemini_credentials,
-    get_zai_credentials
+    get_zai_credentials,
+    ensure_claude_token,
+    ensure_codex_credentials,
+    jwt_claims,
+    write_json_secure,
 )
 
 
@@ -245,3 +253,335 @@ class TestGetZAICredentials:
 
         key = get_zai_credentials()
         assert key is None
+
+
+def _fake_jwt(claims: dict) -> str:
+    """Build an unsigned JWT carrying *claims* (only the payload is read)."""
+    def seg(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+    return f"{seg({'alg': 'none'})}.{seg(claims)}.signature"
+
+
+class TestJwtClaims:
+    """Tests for jwt_claims() payload decoding."""
+
+    def test_decodes_payload(self):
+        assert jwt_claims(_fake_jwt({"exp": 123, "client_id": "app_x"})) == {
+            "exp": 123, "client_id": "app_x",
+        }
+
+    @pytest.mark.parametrize("token", [None, "", "not-a-jwt", "a.b", "a.!!!.c"])
+    def test_rejects_non_jwt(self, token):
+        assert jwt_claims(token) is None
+
+
+class TestWriteJsonSecure:
+    """Tests for write_json_secure() — credential files must stay private."""
+
+    def test_writes_0600_and_leaves_no_temp(self, tmp_path):
+        target = tmp_path / "creds.json"
+        write_json_secure(target, {"a": 1})
+
+        assert json.loads(target.read_text()) == {"a": 1}
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert not (tmp_path / "creds.json.tmp").exists()
+
+    def test_tightens_permissions_on_existing_loose_file(self, tmp_path):
+        target = tmp_path / "creds.json"
+        target.write_text("{}")
+        target.chmod(0o644)
+
+        write_json_secure(target, {"a": 2})
+
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.fixture
+def claude_creds(tmp_path, monkeypatch):
+    """Point Claude credential lookup at a temp file and return a writer."""
+    monkeypatch.delenv("CLAUDE_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("CCLIMITS_NO_TOKEN_REFRESH", raising=False)
+    monkeypatch.setattr(cclimits.sys, "platform", "linux")
+    path = tmp_path / ".credentials.json"
+    monkeypatch.setattr(cclimits, "CLAUDE_CRED_PATHS", [path])
+
+    def write(**overrides):
+        oauth = {
+            "accessToken": "old-access",
+            "refreshToken": "old-refresh",
+            "expiresAt": int((time.time() + 3600) * 1000),
+            "scopes": ["user:inference"],
+            "subscriptionType": "team",
+        }
+        oauth.update(overrides)
+        write_json_secure(path, {"claudeAiOauth": oauth})
+        return path
+
+    write.path = path
+    return write
+
+
+class TestEnsureClaudeToken:
+    """Tests for ensure_claude_token() refresh-and-write-back."""
+
+    def test_unexpired_token_is_used_as_is(self, claude_creds):
+        claude_creds()
+        with patch('cclimits.http_post') as mock_post:
+            assert ensure_claude_token() == "old-access"
+        mock_post.assert_not_called()
+
+    def test_expired_token_is_refreshed_and_written_back(self, claude_creds):
+        path = claude_creds(expiresAt=int((time.time() - 60) * 1000))
+
+        with patch('cclimits.http_post', return_value=(200, {
+            "access_token": "new-access",
+            "expires_in": 28800,
+        })) as mock_post:
+            assert ensure_claude_token() == "new-access"
+
+        url, headers, body = mock_post.call_args[0]
+        assert url == cclimits.CLAUDE_TOKEN_URL
+        assert body["grant_type"] == "refresh_token"
+        assert body["refresh_token"] == "old-refresh"
+        assert body["client_id"] == cclimits.CLAUDE_OAUTH_CLIENT_ID
+
+        saved = json.loads(path.read_text())["claudeAiOauth"]
+        assert saved["accessToken"] == "new-access"
+        assert saved["expiresAt"] > time.time() * 1000
+        # Untouched fields survive the merge
+        assert saved["refreshToken"] == "old-refresh"
+        assert saved["subscriptionType"] == "team"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_rotated_refresh_token_is_persisted(self, claude_creds):
+        path = claude_creds(expiresAt=int((time.time() - 60) * 1000))
+
+        with patch('cclimits.http_post', return_value=(200, {
+            "access_token": "new-access",
+            "expires_in": 28800,
+            "refresh_token": "rotated-refresh",
+            "refresh_token_expires_in": 2592000,
+        })):
+            ensure_claude_token()
+
+        saved = json.loads(path.read_text())["claudeAiOauth"]
+        assert saved["refreshToken"] == "rotated-refresh"
+        assert saved["refreshTokenExpiresAt"] > time.time() * 1000
+
+    def test_failed_refresh_leaves_file_untouched(self, claude_creds):
+        path = claude_creds(expiresAt=int((time.time() - 60) * 1000))
+        before = path.read_text()
+
+        with patch('cclimits.http_post', return_value=(400, {"error": "invalid_grant"})):
+            assert ensure_claude_token() == "old-access"
+
+        assert path.read_text() == before
+
+    def test_missing_refresh_token_is_not_an_error(self, claude_creds):
+        path = claude_creds(expiresAt=int((time.time() - 60) * 1000))
+        data = json.loads(path.read_text())
+        data["claudeAiOauth"].pop("refreshToken")
+        write_json_secure(path, data)
+
+        with patch('cclimits.http_post') as mock_post:
+            assert ensure_claude_token() == "old-access"
+        mock_post.assert_not_called()
+
+    def test_opt_out_disables_refresh(self, claude_creds, monkeypatch):
+        claude_creds(expiresAt=int((time.time() - 60) * 1000))
+        monkeypatch.setenv("CCLIMITS_NO_TOKEN_REFRESH", "1")
+
+        with patch('cclimits.http_post') as mock_post:
+            assert ensure_claude_token() == "old-access"
+        mock_post.assert_not_called()
+
+    def test_force_refreshes_an_unexpired_token(self, claude_creds):
+        claude_creds()
+
+        with patch('cclimits.http_post', return_value=(200, {
+            "access_token": "forced-access",
+            "expires_in": 28800,
+        })):
+            assert ensure_claude_token(force=True) == "forced-access"
+
+    def test_busy_lock_falls_back_to_stored_token(self, claude_creds, monkeypatch):
+        """Another process mid-refresh must not stall a status line."""
+        import fcntl
+
+        path = claude_creds(expiresAt=int((time.time() - 60) * 1000))
+        monkeypatch.setattr(cclimits, "TOKEN_LOCK_TIMEOUT", 0.05)
+
+        lock_path = path.with_name(path.name + ".lock")
+        holder = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        try:
+            with patch('cclimits.http_post') as mock_post:
+                assert ensure_claude_token() == "old-access"
+            mock_post.assert_not_called()
+        finally:
+            fcntl.flock(holder, fcntl.LOCK_UN)
+            os.close(holder)
+
+    def test_stands_down_while_claude_code_is_refreshing(self, claude_creds, monkeypatch):
+        """Claude Code's own proper-lockfile dir must block our refresh."""
+        path = claude_creds(expiresAt=int((time.time() - 60) * 1000))
+        monkeypatch.setattr(cclimits, "TOKEN_LOCK_TIMEOUT", 0.05)
+
+        lock_dir = path.parent / cclimits.CLAUDE_REFRESH_LOCK_NAME
+        lock_dir.mkdir()
+        try:
+            with patch('cclimits.http_post') as mock_post:
+                assert ensure_claude_token() == "old-access"
+            mock_post.assert_not_called()
+            # We must not have removed a lock we don't own.
+            assert lock_dir.is_dir()
+        finally:
+            lock_dir.rmdir()
+
+    def test_steals_a_stale_claude_code_lock(self, claude_creds):
+        """A crashed CLI's abandoned lock must not block us forever."""
+        path = claude_creds(expiresAt=int((time.time() - 60) * 1000))
+        lock_dir = path.parent / cclimits.CLAUDE_REFRESH_LOCK_NAME
+        lock_dir.mkdir()
+        stale = time.time() - (cclimits.CLAUDE_REFRESH_LOCK_STALE + 10)
+        os.utime(lock_dir, (stale, stale))
+
+        with patch('cclimits.http_post', return_value=(200, {
+            "access_token": "new-access",
+            "expires_in": 28800,
+        })):
+            assert ensure_claude_token() == "new-access"
+
+        # Released again once we're done.
+        assert not lock_dir.exists()
+
+    def test_releases_the_refresh_lock_after_success(self, claude_creds):
+        path = claude_creds(expiresAt=int((time.time() - 60) * 1000))
+
+        with patch('cclimits.http_post', return_value=(200, {
+            "access_token": "new-access",
+            "expires_in": 28800,
+        })):
+            ensure_claude_token()
+
+        assert not (path.parent / cclimits.CLAUDE_REFRESH_LOCK_NAME).exists()
+
+    def test_no_credential_file_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CLAUDE_ACCESS_TOKEN", raising=False)
+        monkeypatch.setattr(cclimits.sys, "platform", "linux")
+        monkeypatch.setattr(cclimits, "CLAUDE_CRED_PATHS", [tmp_path / "nope.json"])
+
+        with patch('cclimits.http_post') as mock_post:
+            assert ensure_claude_token() is None
+        mock_post.assert_not_called()
+
+
+@pytest.fixture
+def codex_auth(tmp_path, monkeypatch):
+    """Point Codex credential lookup at a temp auth.json and return a writer."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CCLIMITS_NO_TOKEN_REFRESH", raising=False)
+    path = tmp_path / "auth.json"
+    monkeypatch.setattr(cclimits, "CODEX_AUTH_PATHS", [path])
+
+    def write(exp_offset=3600, **overrides):
+        tokens = {
+            "access_token": _fake_jwt({
+                "exp": int(time.time() + exp_offset),
+                "client_id": "app_from_jwt",
+            }),
+            "refresh_token": "old-refresh",
+            "id_token": _fake_jwt({"sub": "user"}),
+            "account_id": "acct-old",
+        }
+        tokens.update(overrides)
+        write_json_secure(path, {
+            "OPENAI_API_KEY": None,
+            "auth_mode": "chatgpt",
+            "tokens": tokens,
+            "last_refresh": "2026-01-01T00:00:00Z",
+        })
+        return path
+
+    write.path = path
+    return write
+
+
+class TestEnsureCodexCredentials:
+    """Tests for ensure_codex_credentials() refresh-and-write-back."""
+
+    def test_unexpired_token_is_used_as_is(self, codex_auth):
+        codex_auth()
+        with patch('cclimits.http_post') as mock_post:
+            creds = ensure_codex_credentials()
+        mock_post.assert_not_called()
+        assert creds["account_id"] == "acct-old"
+
+    def test_expired_token_is_refreshed_and_written_back(self, codex_auth):
+        path = codex_auth(exp_offset=-60)
+        new_id_token = _fake_jwt({
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-new"},
+        })
+
+        with patch('cclimits.http_post', return_value=(200, {
+            "access_token": "new-access",
+            "refresh_token": "rotated-refresh",
+            "id_token": new_id_token,
+        })) as mock_post:
+            creds = ensure_codex_credentials()
+
+        url, headers, body = mock_post.call_args[0]
+        assert url == cclimits.CODEX_TOKEN_URL
+        assert body["grant_type"] == "refresh_token"
+        assert body["refresh_token"] == "old-refresh"
+        # client_id comes from the user's own token, not the baked-in default
+        assert body["client_id"] == "app_from_jwt"
+        assert body["scope"] == cclimits.CODEX_OAUTH_SCOPE
+
+        saved = json.loads(path.read_text())
+        assert saved["tokens"]["access_token"] == "new-access"
+        # OpenAI rotates the refresh token — persisting it is mandatory
+        assert saved["tokens"]["refresh_token"] == "rotated-refresh"
+        assert saved["tokens"]["id_token"] == new_id_token
+        assert saved["tokens"]["account_id"] == "acct-new"
+        assert saved["last_refresh"] != "2026-01-01T00:00:00Z"
+        assert saved["auth_mode"] == "chatgpt"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+        assert creds["access_token"] == "new-access"
+        assert creds["account_id"] == "acct-new"
+
+    def test_failed_refresh_leaves_file_untouched(self, codex_auth):
+        path = codex_auth(exp_offset=-60)
+        before = path.read_text()
+
+        with patch('cclimits.http_post', return_value=(401, "unauthorized")):
+            creds = ensure_codex_credentials()
+
+        assert path.read_text() == before
+        assert creds["account_id"] == "acct-old"
+
+    def test_unparseable_expiry_does_not_trigger_refresh(self, codex_auth):
+        codex_auth(access_token="opaque-not-a-jwt")
+
+        with patch('cclimits.http_post') as mock_post:
+            ensure_codex_credentials()
+        mock_post.assert_not_called()
+
+    def test_opt_out_disables_refresh(self, codex_auth, monkeypatch):
+        codex_auth(exp_offset=-60)
+        monkeypatch.setenv("CCLIMITS_NO_TOKEN_REFRESH", "1")
+
+        with patch('cclimits.http_post') as mock_post:
+            ensure_codex_credentials()
+        mock_post.assert_not_called()
+
+    def test_force_refreshes_an_unexpired_token(self, codex_auth):
+        codex_auth()
+
+        with patch('cclimits.http_post', return_value=(200, {
+            "access_token": "forced-access",
+        })):
+            creds = ensure_codex_credentials(force=True)
+
+        assert creds["access_token"] == "forced-access"

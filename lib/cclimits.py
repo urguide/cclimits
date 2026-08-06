@@ -6,11 +6,14 @@ Kimi, Google Antigravity, and Synthetic.new
 """
 
 from __future__ import annotations
+import base64
+import contextlib
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -64,6 +67,34 @@ CACHE_FILE = CACHE_DIR / "usage.json"
 DEFAULT_CACHE_TTL = 60  # seconds
 STALE_CACHE_MAX_AGE = 24 * 60 * 60  # 24h — don't serve stale fallback data older than this
 
+# OAuth token refresh configuration.
+#
+# These client IDs are *public* OAuth clients shipped in plaintext inside the
+# vendor CLIs themselves (Claude Code's bundle, the codex binary); they are
+# identifiers, not secrets.  Codex's is only a fallback — the live value is
+# read out of the user's own access-token JWT when possible.
+CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
+CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_OAUTH_SCOPE = "openid profile email"
+
+# Claude Code guards its own refresh with proper-lockfile at
+# <config-dir>/.oauth_refresh.lock (a directory, stolen once its mtime is 60s
+# stale).  Taking the same lock is how cclimits stays mutually exclusive with
+# the CLI itself — see claude_refresh_lock().
+CLAUDE_REFRESH_LOCK_NAME = ".oauth_refresh.lock"
+CLAUDE_REFRESH_LOCK_STALE = 60.0
+
+# Treat a token as expired this many seconds early, so we don't hand the API a
+# token that dies mid-flight.
+TOKEN_EXPIRY_SKEW = 60
+# Longest we'll wait for another process to finish its own refresh before
+# giving up and using the token we already have.  The tmux status line calls
+# us synchronously, so this has to stay short.
+TOKEN_LOCK_TIMEOUT = 3.0
+
+
 def get_cache_path() -> Path:
     """Get cache file path, creating directory if needed"""
     try:
@@ -93,7 +124,6 @@ def read_cache(ttl: int, max_age: int | None = None) -> tuple[dict, int] | None:
             return None
 
         # Check if cache is fresh
-        import time
         cache_age = time.time() - cache_data["timestamp"]
         bound = max_age if max_age is not None else ttl
         if cache_age < bound:
@@ -170,7 +200,6 @@ def write_cache(data: dict) -> bool:
     """Write data to cache file, return success status"""
     try:
         cache_file = get_cache_path()
-        import time
         old_data = {}
         try:
             with open(cache_file, 'r') as f:
@@ -344,6 +373,184 @@ def format_reset_time(iso_time: str | None) -> str:
         return iso_time[:19] if iso_time else "N/A"
 
 
+def token_refresh_enabled() -> bool:
+    """False when the user has opted out of writing to CLI credential files.
+
+    Refreshing means writing another program's credential file, so there has
+    to be an off switch: ``CCLIMITS_NO_TOKEN_REFRESH=1`` restores the old
+    read-only behaviour (an expired token simply reports as expired).
+    """
+    return os.environ.get("CCLIMITS_NO_TOKEN_REFRESH", "").strip().lower() not in (
+        "1", "true", "yes", "on",
+    )
+
+
+def write_json_secure(path: Path, data: dict) -> None:
+    """Atomically write *data* to *path* with 0600 permissions.
+
+    Create the temp file 0600 via os.open so the token never touches disk
+    world-readable (a write_text() + chmod() leaves a window, and umask would
+    otherwise decide the mode).  Raises on failure — callers decide whether a
+    failed write is fatal.
+    """
+    temp_path = path.with_name(path.name + ".tmp")
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    # O_CREAT honors the mode only for a *new* file; enforce 0600 in case the
+    # temp file pre-existed.
+    os.chmod(temp_path, 0o600)
+    os.replace(temp_path, path)
+
+
+@contextlib.contextmanager
+def credential_lock(path: Path):
+    """Serialize refresh+write against other cclimits processes.
+
+    Yields True when the lock was acquired, False when it wasn't within
+    TOKEN_LOCK_TIMEOUT (another process is already refreshing — the caller
+    should keep using the token it has rather than block a status line).
+
+    This only coordinates cclimits with itself: neither Claude Code nor codex
+    takes a file lock on their credential files, so a genuinely simultaneous
+    refresh by the vendor CLI is still possible.  Callers re-read the file
+    under the lock to keep that window as small as possible.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows
+        yield True
+        return
+
+    try:
+        fd = os.open(path.with_name(path.name + ".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+    except (OSError, PermissionError):
+        # Can't even create a lock file (read-only home, odd perms) — proceed
+        # unlocked rather than never refreshing.
+        yield True
+        return
+
+    acquired = False
+    deadline = time.monotonic() + TOKEN_LOCK_TIMEOUT
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+            break
+        except OSError:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+@contextlib.contextmanager
+def claude_refresh_lock(cred_path: Path):
+    """Hold Claude Code's *own* OAuth refresh lock while we refresh.
+
+    Anthropic rotates the refresh token on every exchange, so two concurrent
+    refreshes leave the loser holding a retired token.  Claude Code guards
+    against that with a proper-lockfile directory next to its credentials;
+    creating the same directory makes cclimits and the CLI mutually exclusive
+    instead of merely racing politely.
+
+    Yields True if we may refresh, False if Claude Code holds the lock right
+    now — in which case the caller should stand down, because the CLI is about
+    to write a fresh token anyway.
+    """
+    lock_dir = cred_path.parent / CLAUDE_REFRESH_LOCK_NAME
+    owned = False
+    proceed = False
+    deadline = time.monotonic() + TOKEN_LOCK_TIMEOUT
+    while True:
+        try:
+            os.mkdir(lock_dir, 0o700)
+            owned = proceed = True
+            break
+        except FileExistsError:
+            pass
+        except OSError:
+            # Can't create it at all (odd perms, read-only home).  Our own
+            # flock still serializes cclimits against itself, so refresh
+            # rather than never recovering.
+            proceed = True
+            break
+
+        try:
+            stale = (time.time() - lock_dir.stat().st_mtime) > CLAUDE_REFRESH_LOCK_STALE
+        except OSError:
+            stale = False  # vanished between mkdir and stat — just retry
+        if stale:
+            # proper-lockfile considers a lock this old abandoned and steals
+            # it; matching that keeps a crashed CLI from blocking us forever.
+            try:
+                os.rmdir(lock_dir)
+            except OSError:
+                pass
+        if time.monotonic() >= deadline:
+            break
+        if not stale:
+            time.sleep(0.1)
+
+    try:
+        yield proceed
+    finally:
+        if owned:
+            try:
+                os.rmdir(lock_dir)
+            except OSError:
+                pass
+
+
+def jwt_claims(token: str | None) -> dict | None:
+    """Decode a JWT payload without verifying it.
+
+    Used only to read non-secret bookkeeping claims (``exp``, ``client_id``,
+    account id) out of a token we already hold; the server still validates it.
+    """
+    if not token or not isinstance(token, str):
+        return None
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        return claims if isinstance(claims, dict) else None
+    except Exception:
+        return None
+
+
+def _is_expired(expiry_epoch: float | None) -> bool:
+    """True if *expiry_epoch* (seconds since epoch) is past, or nearly so."""
+    if not expiry_epoch:
+        return False
+    return time.time() >= (expiry_epoch - TOKEN_EXPIRY_SKEW)
+
+
+CLAUDE_CRED_PATHS = [
+    Path.home() / ".claude" / ".credentials.json",  # Actual location
+    Path.home() / ".claude" / "credentials.json",
+    Path.home() / ".config" / "claude" / "credentials.json",
+]
+
+
 def get_claude_credentials() -> str | None:
     """Get Claude Code OAuth token from various sources"""
 
@@ -364,12 +571,7 @@ def get_claude_credentials() -> str | None:
             pass
 
     # Method 2: Linux credentials file (actual location)
-    cred_paths = [
-        Path.home() / ".claude" / ".credentials.json",  # Actual location
-        Path.home() / ".claude" / "credentials.json",
-        Path.home() / ".config" / "claude" / "credentials.json",
-    ]
-    for cred_path in cred_paths:
+    for cred_path in CLAUDE_CRED_PATHS:
         if cred_path.exists():
             try:
                 creds = json.loads(cred_path.read_text())
@@ -384,19 +586,158 @@ def get_claude_credentials() -> str | None:
     return os.environ.get("CLAUDE_ACCESS_TOKEN")
 
 
-def get_claude_usage() -> dict:
-    """Fetch Claude Code usage from Anthropic API"""
-    token = get_claude_credentials()
-    if not token:
-        return {"error": "No credentials found", "hint": "Run 'claude' and authenticate first"}
+def _read_claude_cred_file() -> tuple[Path, dict, dict] | None:
+    """Return (path, whole_file, oauth_section) for Claude's credential file.
 
+    The file is either ``{"claudeAiOauth": {...}}`` (what Claude Code writes)
+    or a flat object; ``oauth_section`` is the dict holding the token either
+    way, so callers can mutate it in place and write ``whole_file`` back.
+    """
+    for cred_path in CLAUDE_CRED_PATHS:
+        if not cred_path.exists():
+            continue
+        try:
+            creds = json.loads(cred_path.read_text())
+        except (json.JSONDecodeError, OSError, PermissionError, ValueError):
+            continue
+        if not isinstance(creds, dict):
+            continue
+        oauth = creds.get("claudeAiOauth") if isinstance(creds.get("claudeAiOauth"), dict) else creds
+        if oauth.get("accessToken"):
+            return cred_path, creds, oauth
+    return None
+
+
+def refresh_claude_token(refresh_token: str) -> dict | None:
+    """Exchange a Claude refresh token for a new access token.
+
+    Mirrors what Claude Code itself sends (JSON body, oauth beta header).
+    Returns the raw token response, or None on any failure.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "anthropic-beta": "oauth-2025-04-20",
+        "User-Agent": "cclimits",
+    }
+    body = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": CLAUDE_OAUTH_CLIENT_ID,
+    }
+    status, data = http_post(CLAUDE_TOKEN_URL, headers, body)
+    if status == 200 and isinstance(data, dict) and data.get("access_token"):
+        return data
+    return None
+
+
+def ensure_claude_token(force: bool = False) -> str | None:
+    """Return a usable Claude access token, refreshing it if it has expired.
+
+    Nothing else refreshes this file while Claude Code isn't running, so an
+    overnight gap used to leave every lookup 401ing.  When the stored token is
+    past ``expiresAt`` (or *force* is set, after the API rejected it anyway)
+    we redeem the refresh token and write the result back to Claude's own
+    credential file, so Claude Code picks it up too.
+
+    Falls back to the plain stored token whenever refresh isn't possible:
+    opted out, no refresh token, macOS Keychain storage, or a failed exchange.
+    """
+    token = get_claude_credentials()
+    if not token or not token_refresh_enabled():
+        return token
+
+    found = _read_claude_cred_file()
+    if not found:
+        # Keychain- or env-sourced token: we can read it but have nowhere safe
+        # to write a new one back, so leave it alone.
+        return token
+    cred_path, _, oauth = found
+
+    expires_at = oauth.get("expiresAt")
+    expiry_epoch = expires_at / 1000 if isinstance(expires_at, (int, float)) else None
+    if not force and not _is_expired(expiry_epoch):
+        return token
+
+    with credential_lock(cred_path) as acquired:
+        if not acquired:
+            return token
+
+        with claude_refresh_lock(cred_path) as clear:
+            if not clear:
+                # Claude Code is mid-refresh; whatever it writes wins.
+                found = _read_claude_cred_file()
+                return found[2].get("accessToken") if found else token
+
+            # Re-read holding both locks: another cclimits process — or Claude
+            # Code, which we just waited out — may have refreshed already.
+            found = _read_claude_cred_file()
+            if not found:
+                return token
+            cred_path, creds, oauth = found
+            current = oauth.get("accessToken")
+
+            expires_at = oauth.get("expiresAt")
+            expiry_epoch = expires_at / 1000 if isinstance(expires_at, (int, float)) else None
+            if force:
+                # Someone already replaced the token we were rejected on.
+                if current and current != token:
+                    return current
+            elif not _is_expired(expiry_epoch):
+                return current or token
+
+            refresh_token = oauth.get("refreshToken")
+            if not refresh_token:
+                return current or token
+
+            new_tokens = refresh_claude_token(refresh_token)
+            if not new_tokens:
+                return current or token
+
+            oauth["accessToken"] = new_tokens["access_token"]
+            expires_in = new_tokens.get("expires_in")
+            if isinstance(expires_in, (int, float)):
+                oauth["expiresAt"] = int((time.time() + expires_in) * 1000)
+            # Anthropic rotates the refresh token on every exchange (verified
+            # live), so persisting the new one is mandatory — drop it and
+            # Claude Code is left holding a token the server has retired.
+            if new_tokens.get("refresh_token"):
+                oauth["refreshToken"] = new_tokens["refresh_token"]
+                rt_expires_in = new_tokens.get("refresh_token_expires_in")
+                if isinstance(rt_expires_in, (int, float)):
+                    oauth["refreshTokenExpiresAt"] = int((time.time() + rt_expires_in) * 1000)
+
+            try:
+                write_json_secure(cred_path, creds)
+            except (OSError, PermissionError, TypeError) as e:
+                # The in-memory token still works for this run.
+                print(f"Warning: Could not save refreshed Claude token: {e}", file=sys.stderr)
+
+            return new_tokens["access_token"]
+
+
+def _claude_usage_request(token: str) -> tuple[int, dict | str]:
     headers = {
         "Authorization": f"Bearer {token}",
         "anthropic-beta": "oauth-2025-04-20",
         "Content-Type": "application/json",
     }
+    return http_get("https://api.anthropic.com/api/oauth/usage", headers)
 
-    status, data = http_get("https://api.anthropic.com/api/oauth/usage", headers)
+
+def get_claude_usage() -> dict:
+    """Fetch Claude Code usage from Anthropic API"""
+    token = ensure_claude_token()
+    if not token:
+        return {"error": "No credentials found", "hint": "Run 'claude' and authenticate first"}
+
+    status, data = _claude_usage_request(token)
+
+    if status == 401:
+        # Rejected despite looking unexpired — revoked, clock skew, or a copy
+        # that went stale between read and use.  Force one refresh and retry.
+        retry_token = ensure_claude_token(force=True)
+        if retry_token and retry_token != token:
+            status, data = _claude_usage_request(retry_token)
 
     if status == 200 and isinstance(data, dict):
         result: dict = {"status": "ok"}
@@ -427,6 +768,12 @@ def get_claude_usage() -> dict:
         return {"error": f"HTTP {status}", "details": str(data)[:200]}
 
 
+CODEX_AUTH_PATHS = [
+    Path.home() / ".codex" / "auth.json",
+    Path.home() / ".config" / "codex" / "auth.json",
+]
+
+
 def get_openai_credentials() -> dict:
     """Get OpenAI API key and OAuth token from environment or config"""
     result = {}
@@ -436,11 +783,7 @@ def get_openai_credentials() -> dict:
         result["api_key"] = key
 
     # Codex auth file (actual location: ~/.codex/auth.json)
-    auth_paths = [
-        Path.home() / ".codex" / "auth.json",
-        Path.home() / ".config" / "codex" / "auth.json",
-    ]
-    for auth_path in auth_paths:
+    for auth_path in CODEX_AUTH_PATHS:
         if auth_path.exists():
             try:
                 auth = json.loads(auth_path.read_text())
@@ -459,9 +802,157 @@ def get_openai_credentials() -> dict:
     return result
 
 
+def _read_codex_auth_file() -> tuple[Path, dict, dict] | None:
+    """Return (path, whole_file, tokens_section) for Codex's auth.json.
+
+    Picks the last path that actually holds an OAuth access token, matching
+    get_openai_credentials()'s last-one-wins read order.
+    """
+    found = None
+    for auth_path in CODEX_AUTH_PATHS:
+        if not auth_path.exists():
+            continue
+        try:
+            auth = json.loads(auth_path.read_text())
+        except (json.JSONDecodeError, OSError, PermissionError, ValueError):
+            continue
+        if not isinstance(auth, dict):
+            continue
+        tokens = auth.get("tokens")
+        if isinstance(tokens, dict) and tokens.get("access_token"):
+            found = (auth_path, auth, tokens)
+    return found
+
+
+def refresh_codex_token(refresh_token: str, client_id: str = CODEX_OAUTH_CLIENT_ID) -> dict | None:
+    """Exchange a Codex refresh token for a new access token.
+
+    Mirrors what the codex CLI sends.  Returns the raw token response, or None
+    on any failure.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "cclimits",
+    }
+    body = {
+        "client_id": client_id,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "scope": CODEX_OAUTH_SCOPE,
+    }
+    status, data = http_post(CODEX_TOKEN_URL, headers, body)
+    if status == 200 and isinstance(data, dict) and data.get("access_token"):
+        return data
+    return None
+
+
+def ensure_codex_credentials(force: bool = False) -> dict:
+    """Like get_openai_credentials(), but refreshes an expired OAuth token.
+
+    Same problem and same fix as Claude, with two Codex-specific wrinkles:
+
+    * auth.json records no expiry, so the deadline comes from the access
+      token's own ``exp`` JWT claim (Codex tokens last ~10 days, so this
+      fires far less often than Claude's 8h one).
+    * OpenAI **rotates** the refresh token on every exchange, so writing the
+      response back is mandatory — refreshing without persisting would strand
+      the codex CLI on a refresh token the server has already retired.
+    """
+    creds = get_openai_credentials()
+    if not creds.get("access_token") or not token_refresh_enabled():
+        return creds
+
+    found = _read_codex_auth_file()
+    if not found:
+        return creds
+    auth_path, _, tokens = found
+
+    claims = jwt_claims(tokens.get("access_token"))
+    expiry_epoch = claims.get("exp") if isinstance(claims, dict) else None
+    if not isinstance(expiry_epoch, (int, float)):
+        expiry_epoch = None
+    # Without a parseable expiry, only a rejected request justifies a refresh.
+    if not force and not _is_expired(expiry_epoch):
+        return creds
+
+    with credential_lock(auth_path) as acquired:
+        if not acquired:
+            return creds
+
+        found = _read_codex_auth_file()
+        if not found:
+            return creds
+        auth_path, auth, tokens = found
+        current = tokens.get("access_token")
+
+        claims = jwt_claims(current)
+        expiry_epoch = claims.get("exp") if isinstance(claims, dict) else None
+        if not isinstance(expiry_epoch, (int, float)):
+            expiry_epoch = None
+        if force:
+            if current and current != creds.get("access_token"):
+                return _codex_creds_from_tokens(creds, tokens)
+        elif not _is_expired(expiry_epoch):
+            return _codex_creds_from_tokens(creds, tokens)
+
+        refresh_token = tokens.get("refresh_token")
+        if not refresh_token:
+            return _codex_creds_from_tokens(creds, tokens)
+
+        # Prefer the client_id the user's own token was issued to.
+        client_id = CODEX_OAUTH_CLIENT_ID
+        if isinstance(claims, dict) and isinstance(claims.get("client_id"), str):
+            client_id = claims["client_id"]
+
+        new_tokens = refresh_codex_token(refresh_token, client_id)
+        if not new_tokens:
+            return _codex_creds_from_tokens(creds, tokens)
+
+        tokens["access_token"] = new_tokens["access_token"]
+        if new_tokens.get("id_token"):
+            tokens["id_token"] = new_tokens["id_token"]
+            # codex derives the account id from the id_token; keep them in sync.
+            id_claims = jwt_claims(new_tokens["id_token"]) or {}
+            auth_claims = id_claims.get("https://api.openai.com/auth")
+            if isinstance(auth_claims, dict) and auth_claims.get("chatgpt_account_id"):
+                tokens["account_id"] = auth_claims["chatgpt_account_id"]
+        if new_tokens.get("refresh_token"):
+            tokens["refresh_token"] = new_tokens["refresh_token"]
+        # codex uses last_refresh to decide when to refresh next; stamping it
+        # keeps the CLI from immediately redoing the work we just did.
+        auth["last_refresh"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        try:
+            write_json_secure(auth_path, auth)
+        except (OSError, PermissionError, TypeError) as e:
+            print(f"Warning: Could not save refreshed Codex token: {e}", file=sys.stderr)
+
+        return _codex_creds_from_tokens(creds, tokens)
+
+
+def _codex_creds_from_tokens(creds: dict, tokens: dict) -> dict:
+    """Overlay the on-disk token pair onto a get_openai_credentials() dict."""
+    updated = dict(creds)
+    if tokens.get("access_token"):
+        updated["access_token"] = tokens["access_token"]
+    if tokens.get("account_id"):
+        updated["account_id"] = tokens["account_id"]
+    return updated
+
+
+def _codex_usage_request(creds: dict) -> tuple[int, dict | str]:
+    headers = {
+        "Authorization": f"Bearer {creds['access_token']}",
+        "chatgpt-account-id": creds["account_id"],
+        "User-Agent": "codex-cli",
+        "Content-Type": "application/json",
+    }
+    return http_get("https://chatgpt.com/backend-api/wham/usage", headers)
+
+
 def get_codex_usage() -> dict:
     """Fetch Codex usage via ChatGPT backend API"""
-    creds = get_openai_credentials()
+    creds = ensure_codex_credentials()
 
     if not creds.get("access_token") and not creds.get("api_key"):
         return {"error": "No credentials found", "hint": "Run 'codex login' or set OPENAI_API_KEY"}
@@ -470,14 +961,14 @@ def get_codex_usage() -> dict:
 
     # Try the ChatGPT backend usage API (requires OAuth token + account ID)
     if creds.get("access_token") and creds.get("account_id"):
-        headers = {
-            "Authorization": f"Bearer {creds['access_token']}",
-            "chatgpt-account-id": creds["account_id"],
-            "User-Agent": "codex-cli",
-            "Content-Type": "application/json",
-        }
+        status, data = _codex_usage_request(creds)
 
-        status, data = http_get("https://chatgpt.com/backend-api/wham/usage", headers)
+        if status == 401:
+            retry = ensure_codex_credentials(force=True)
+            if retry.get("access_token") and retry.get("account_id") \
+                    and retry["access_token"] != creds["access_token"]:
+                creds = retry
+                status, data = _codex_usage_request(creds)
 
         if status == 200 and isinstance(data, dict):
             result["status"] = "ok"
@@ -766,24 +1257,8 @@ def get_gemini_credentials() -> dict | None:
                             oauth_data = json.loads(oauth_path.read_text())
                             oauth_data["access_token"] = new_tokens["access_token"]
                             oauth_data["expiry_date"] = new_expiry_ms
-                            
-                            # Atomic write pattern to avoid corruption.
-                            # Create the temp file 0600 via os.open so the
-                            # token never touches disk world-readable (a
-                            # write_text() + chmod() leaves a window, and
-                            # umask would otherwise decide the mode).
-                            temp_path = oauth_path.with_suffix(".tmp")
-                            fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                            try:
-                                with os.fdopen(fd, "w") as f:
-                                    json.dump(oauth_data, f, indent=2)
-                            except BaseException:
-                                temp_path.unlink(missing_ok=True)
-                                raise
-                            # O_CREAT honors the mode only for a *new* file;
-                            # enforce 0600 in case the temp file pre-existed.
-                            os.chmod(temp_path, 0o600)
-                            os.replace(temp_path, oauth_path)
+
+                            write_json_secure(oauth_path, oauth_data)
                         except Exception as e:
                             # Log warning but continue - in-memory token still works
                             print(f"Warning: Could not save refreshed OAuth token: {e}")

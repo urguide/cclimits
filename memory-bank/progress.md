@@ -2,8 +2,8 @@
 
 ## Working Features
 
-- **Claude Code**: OAuth token from keychain (macOS) or `~/.claude/.credentials.json` (Linux)
-- **OpenAI Codex**: JWT from `~/.codex/auth.json`
+- **Claude Code**: OAuth token from keychain (macOS) or `~/.claude/.credentials.json` (Linux); expired tokens are refreshed against `platform.claude.com/v1/oauth/token` and written back to the credential file — including the rotated refresh token — while holding the CLI's own `.oauth_refresh.lock` (file-backed creds only; Keychain stays read-only)
+- **OpenAI Codex**: JWT from `~/.codex/auth.json`; expiry read from the token's own `exp` claim, refreshed against `auth.openai.com/oauth/token` with the rotated refresh token + `id_token` + `last_refresh` written back
 - **Gemini CLI** (legacy — CLI retired 2026-06-18): OAuth from `~/.gemini/oauth_creds.json`; token refresh needs an installed Gemini CLI package or env overrides, otherwise reports ⏰ expired
 - **Google Antigravity**: OAuth tokens read from `~/.gemini/antigravity-cli/antigravity-oauth-token` (written by `agy` CLI) or `ANTIGRAVITY_REFRESH_TOKEN`; per-model quota tracking, live-verified against real install
 - **Z.AI**: API token from environment variable (`$ZAI_KEY` or `$ZAI_API_KEY`), 5h shared token quota + monthly MCP-tools quota (`mcp_quota` with per-tool breakdown & reset) + client-side peak/off-peak quota-rate indicator (`quota_rate`, ⚡3x oneline marker during peak)
@@ -27,7 +27,8 @@
 - ✅ Research on additional providers completed (`research/ai-coding-providers.md`)
 - ✅ Providers fetched concurrently; cache hits skip all network/credential calls; transient failures fall back to <24h-old cached data with stale marker (v1.3.0)
 - ✅ Data-driven `PROVIDERS` registry — adding a provider is one registry entry + one fetch function
-- ✅ CI (GitHub Actions matrix) + automated npm publish on `v*` tags via Trusted Publishing (OIDC); 226 tests
+- ✅ Claude/Codex OAuth tokens self-heal: expiry- and 401-driven refresh, atomic 0600 write-back to the vendor's own credential file, `flock`-serialized plus interop with Claude Code's own `.oauth_refresh.lock`, opt-out via `CCLIMITS_NO_TOKEN_REFRESH=1`
+- ✅ CI (GitHub Actions matrix) + automated npm publish on `v*` tags via Trusted Publishing (OIDC); 255 tests
 
 ## Known Issues
 

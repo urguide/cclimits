@@ -293,8 +293,8 @@ Credentials are auto-discovered from these locations:
 
 | Tool | Location |
 |------|----------|
-| **Claude** | `~/.claude/.credentials.json` (Linux) or macOS Keychain |
-| **Codex** | `~/.codex/auth.json` |
+| **Claude** | `~/.claude/.credentials.json` (Linux, auto-refreshes) or macOS Keychain |
+| **Codex** | `~/.codex/auth.json` (auto-refreshes) |
 | **Gemini** | `~/.gemini/oauth_creds.json` (auto-refreshes) |
 | **Z.AI** | `$ZAI_KEY` or `$ZAI_API_KEY` environment variable |
 | **OpenRouter** | `$OPENROUTER_API_KEY` environment variable |
@@ -316,6 +316,47 @@ export OPENROUTER_API_KEY=your-key  # Add to ~/.zshrc or ~/.bashrc
 export MOONSHOT_API_KEY=your-key    # Add to ~/.zshrc or ~/.bashrc
 export SYNTHETIC_API_KEY=your-key   # Add to ~/.zshrc or ~/.bashrc
 ```
+
+### Claude & Codex Token Refresh
+
+Claude Code and codex only refresh their own OAuth tokens while they're
+running. Claude's access token lasts ~8h, so leaving Claude Code closed
+overnight used to leave every lookup returning `Token expired` — and in a tmux
+status line that reads as a frozen percentage, because the wrapper keeps
+serving the last good value rather than overwrite it with an error.
+
+cclimits now redeems the stored refresh token itself when the access token has
+expired (or when the API rejects it), and **writes the result back to the CLI's
+own credential file** so Claude Code / codex pick it up too:
+
+| | Claude | Codex |
+|---|---|---|
+| Token endpoint | `platform.claude.com/v1/oauth/token` | `auth.openai.com/oauth/token` |
+| Access token life | ~8h | ~10d |
+| Expiry read from | `expiresAt` in the credential file | `exp` claim of the access-token JWT |
+| Refresh token rotates | **yes** | **yes** |
+
+Both providers rotate the refresh token on every exchange, so writing the
+response back isn't just a convenience — skip it and the CLI is left holding a
+token the server has already retired.
+
+Details:
+
+- Writes are atomic and `0600`; every other field in the file is preserved.
+- Refresh + write is serialized across cclimits processes with a `.lock` file
+  next to the credential file, and cclimits re-reads the file under that lock
+  so it skips the refresh if someone else got there first.
+- For Claude it additionally takes **Claude Code's own** refresh lock — the
+  proper-lockfile directory `~/.claude/.oauth_refresh.lock` — so the CLI and
+  cclimits can't rotate the token out from under each other. If Claude Code
+  holds it, cclimits stands down; if the lock is more than 60s stale (crashed
+  CLI) it's stolen, matching proper-lockfile's own rule.
+- codex exposes no equivalent lock file, so there the coordination is
+  cclimits-vs-cclimits only.
+- macOS Keychain-stored Claude credentials are **read-only** here — cclimits
+  won't write to the Keychain, so expiry there still reports as expired.
+- Opt out with `CCLIMITS_NO_TOKEN_REFRESH=1` to restore the previous
+  read-only behaviour.
 
 ### Antigravity Authentication
 

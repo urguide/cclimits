@@ -23,6 +23,20 @@ def isolated_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(cclimits, "CACHE_FILE", cache_dir / "usage.json")
 
 
+@pytest.fixture(autouse=True)
+def isolated_credentials(tmp_path, monkeypatch):
+    """Keep tests away from the developer's real CLI credential files.
+
+    Token refresh reads — and on expiry writes and locks — ~/.claude and
+    ~/.codex.  A test that mocks only http_get would otherwise reach the real
+    files, so every test starts with those paths pointing at an empty temp
+    directory.  Tests that need credentials override these with their own.
+    """
+    cred_dir = tmp_path / "cli-credentials"
+    monkeypatch.setattr(cclimits, "CLAUDE_CRED_PATHS", [cred_dir / ".credentials.json"])
+    monkeypatch.setattr(cclimits, "CODEX_AUTH_PATHS", [cred_dir / "auth.json"])
+
+
 @pytest.fixture
 def sample_claude_usage_response():
     """Mock Claude API usage response."""
