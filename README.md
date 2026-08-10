@@ -32,6 +32,21 @@ chmod +x ~/.local/bin/cclimits-tmux
 
 Make sure `~/.local/bin` is on your `PATH`.
 
+### System-wide (useful for tmux)
+
+`~/.local/bin` is usually added to `PATH` by an interactive shell rc file,
+which the tmux **server** never reads — see [tmux Integration](#tmux-integration).
+Installing from a git checkout to a directory that is already on the default
+`PATH` avoids that class of problem:
+
+```bash
+sudo install -m 755 lib/cclimits.py /usr/local/bin/cclimits
+sudo install -m 755 bin/cclimits-tmux /usr/local/bin/cclimits-tmux
+```
+
+These are copies, so re-run both commands after every update or the installed
+version will silently drift from the source.
+
 ### Via Git
 
 ```bash
@@ -39,6 +54,10 @@ git clone https://github.com/urguide/cclimits.git
 ln -s $(pwd)/cclimits/lib/cclimits.py ~/.local/bin/cclimits
 ln -s $(pwd)/cclimits/bin/cclimits-tmux ~/.local/bin/cclimits-tmux
 ```
+
+Symlinks (rather than copies) keep the installed command in step with the
+checkout, and let the wrapper find `cclimits` via its sibling `../lib`
+directory without any `PATH` or `CCLIMITS_BIN` configuration.
 
 ## Usage
 
@@ -362,8 +381,27 @@ or show tmux's `<'...' not ready>` marker. Set `CCLIMITS_BIN` to an absolute
 path to make resolution independent of the server's `PATH`:
 
 ```tmux
-set-environment -g CCLIMITS_BIN "$HOME/.local/bin/cclimits"
+set-environment -g CCLIMITS_BIN "/usr/local/bin/cclimits"
 ```
+
+Two failure modes are worth calling out together, because they combine into a
+silent one:
+
+- **Copy vs symlink.** If `cclimits-tmux` was *copied* to its install
+  directory, `readlink -f` resolves to itself, so the sibling `../lib`
+  probe looks for a nonexistent `<prefix>/../lib/cclimits.py` and fails.
+  A symlink back to the checkout makes that step succeed on its own.
+- **This failure is invisible.** The wrapper deliberately preserves the last
+  known-good line, so a lookup that fails every time does not blank the status
+  bar — it just freezes it at a stale reading. If the numbers look stuck, run
+  the wrapper by hand and check that the cache body is actually being written:
+
+  ```bash
+  ls -l ${TMPDIR:-/tmp}/cclimits-tmux.$(id -u).*
+  ```
+
+  A `.lease`/`.lock` pair with no accompanying `.cache` file means every
+  refresh is failing.
 
 ### Notes
 

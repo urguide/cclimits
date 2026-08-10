@@ -66,6 +66,13 @@ Gemini OAuth credentials are extracted from the user's Gemini CLI installation, 
 python3 lib/cclimits.py --oneline
 python3 lib/cclimits.py --json
 
+# Reinstall system-wide copies (REQUIRED after changing lib/ or bin/ if
+# installed to /usr/local/bin — copies do not track the checkout)
+sudo install -m 755 lib/cclimits.py /usr/local/bin/cclimits
+sudo install -m 755 bin/cclimits-tmux /usr/local/bin/cclimits-tmux
+tmux kill-session -t _cc 2>/dev/null; pkill -f 'cclimits-tmux --watch'  # respawn the watcher
+rm -f ${TMPDIR:-/tmp}/cclimits-tmux.$(id -u).*.lease                    # skip the TTL backoff
+
 # Test via npx (uses published version)
 npx cclimits
 
