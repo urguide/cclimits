@@ -5,7 +5,13 @@ Tests for output formatting functions.
 from io import StringIO
 from unittest.mock import patch
 import pytest
-from cclimits import print_section, print_oneline, get_status_icon
+from cclimits import (
+    print_section,
+    print_oneline,
+    get_status_icon,
+    _apply_icon_label,
+    PROVIDERS,
+)
 
 
 class TestPrintSection:
@@ -613,6 +619,86 @@ class TestOnelineCompact:
         }}
         print_oneline(results, "both", compact=True, show_resets=True, cache_age=30)
         assert capsys.readouterr().out == "Grok:55%(6d)\n"
+
+
+class TestOnelineIcons:
+    """--icons swaps provider names for single-cell Nerd Font glyphs.
+
+    Motivation is width: the default tmux line spends 18 of its ~48 columns
+    on the words Claude/Codex/Grok alone.
+    """
+
+    CLAUDE = "\uec82"   # cod-claude
+    CODEX = "\uec81"    # cod-openai
+    GROK = "\ueb72"     # cod-twitter
+    ZAI = "\U000f0c37"  # md-alpha_z_circle
+
+    def test_compact_line_uses_glyphs_and_is_shorter(self, capsys):
+        results = {
+            "claude": {"status": "ok",
+                       "five_hour": {"used": "40%", "resets_in": "3h"},
+                       "seven_day": {"used": "64%", "resets_in": "2d"}},
+            "codex": {"status": "ok",
+                      "secondary_window": {"used": "34%", "resets_in": "7d"}},
+            "grok": {"status": "ok", "credit_usage": {
+                "percentage": 55, "period": "7d", "resets_in": "6d"}},
+        }
+        print_oneline(results, "both", compact=True, show_resets=True, icons=True)
+        out = capsys.readouterr().out.strip()
+        assert out == (
+            f"{self.CLAUDE}:40%/64%(3h/2d)_"
+            f"{self.CODEX}:34%(7d)_"
+            f"{self.GROK}:55%(6d)"
+        )
+        # Each glyph is one character, so the saving is the full label length.
+        assert len(out) == len("Claude:40%/64%(3h/2d)_Codex:34%(7d)_Grok:55%(6d)") - 12
+
+    def test_default_output_is_unchanged(self, capsys):
+        """Regression guard: the flag must be opt-in.
+
+        Most users have no patched font, and a glyph they cannot render is
+        strictly worse than the word it replaced.
+        """
+        results = {"claude": {"status": "ok",
+                              "five_hour": {"used": "3.0%"},
+                              "seven_day": {"used": "42.4%"}}}
+        print_oneline(results, "both", compact=True)
+        assert capsys.readouterr().out == "Claude:3%/43%\n"
+
+    def test_non_compact_mode_keeps_spacing(self, capsys):
+        results = {"grok": {"status": "ok",
+                            "credit_usage": {"percentage": 55, "period": "7d"}}}
+        print_oneline(results, "both", icons=True)
+        assert capsys.readouterr().out == f"{self.GROK}: 55% (7d) \u2705\n"
+
+    def test_failure_states_are_labeled_by_glyph(self, capsys):
+        """The failure branch builds its label separately from the renderers,
+        so it needs its own coverage or it would keep printing words."""
+        results = {
+            "zai": {"error": "No credentials found"},
+            "codex": {"error": "Token expired"},
+        }
+        print_oneline(results, "both", compact=True, icons=True)
+        out = capsys.readouterr().out.strip()
+        assert out == f"{self.CODEX}:expired_{self.ZAI}:no key"
+
+    def test_every_provider_defines_an_icon(self):
+        """A missing entry would render a line that is part glyph, part word."""
+        for provider in PROVIDERS:
+            icon = provider["oneline_icon"]
+            assert len(icon) == 1, f"{provider['key']} icon must be a single glyph"
+
+    def test_icons_are_unique(self):
+        """Two providers sharing a glyph would be indistinguishable."""
+        icons = [p["oneline_icon"] for p in PROVIDERS]
+        assert len(set(icons)) == len(icons)
+
+    def test_label_is_only_replaced_at_the_start(self):
+        """A bare replace would also rewrite the label inside a value."""
+        assert _apply_icon_label("Grok: 5% Grok-4", "Grok", "X") == "X: 5% Grok-4"
+
+    def test_unrecognized_prefix_is_left_alone(self):
+        assert _apply_icon_label("( Flash 7% )", "Gemini", "X") == "( Flash 7% )"
 
 
 class TestOnelineSingleWindowDegradation:

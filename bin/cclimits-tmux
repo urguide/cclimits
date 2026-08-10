@@ -64,6 +64,9 @@ LEASE="$CACHE.lease"
 DISPLAY_CACHE="${TMPDIR:-/tmp}/cclimits-tmux.$(id -u).display.cache"
 DISPLAY_TMP="$DISPLAY_CACHE.$BASHPID.tmp"
 GROK_CMD=${GROK_BIN:-grok}
+# cod-twitter, the --icons label for Grok.  Kept as an escape rather than a
+# literal so this file stays legible in an editor without a patched font.
+GROK_ICON=$'\ueb72'
 
 # Resolve cclimits: explicit override, then the repo checkout this script
 # lives in, then PATH.
@@ -103,7 +106,13 @@ if [ ! -f "$LEASE" ] || [ $(( $(date +%s) - $(stat -c %Y -- "$LEASE") )) -ge "$T
     # An expired Grok session can be refreshed safely by the official CLI's
     # model-list command. It exercises AuthManager (including xAI's rotating-RT
     # lock/write protocol) but does not send a model prompt or consume credits.
-    if grep -qE 'Grok:(expired|⏰)' -- "$CACHE.tmp" && command -v "$GROK_CMD" >/dev/null 2>&1; then
+    #
+    # Both spellings of the label must match: --icons replaces `Grok` with the
+    # cod-twitter glyph (U+EB72).  Matching only the word would silently
+    # disable auto-refresh for icon users — the status line would sit on
+    # `expired` until the next manual `grok` run, with nothing to indicate
+    # that the recovery path had stopped firing.
+    if grep -qE "(Grok|$GROK_ICON):(expired|⏰)" -- "$CACHE.tmp" && command -v "$GROK_CMD" >/dev/null 2>&1; then
       if "$GROK_CMD" models >/dev/null 2>&1; then
         # shellcheck disable=SC2086
         "${CMD[@]}" $ARGS >"$CACHE.tmp" 2>/dev/null || true

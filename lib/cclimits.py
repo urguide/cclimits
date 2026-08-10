@@ -2663,49 +2663,88 @@ def _render_grok(data, window, use_color, show_resets=False):
 
 # Provider registry — single source of truth.  Adding a provider: one entry
 # here + a fetch function (+ a custom renderer if the shared ones don't fit).
+#
+# `oneline_icon` is the --icons replacement for `oneline_label`: a single-cell
+# Nerd Font glyph, used to shorten a tmux status line where every column
+# counts.  Codepoints are named so they can be re-checked against a font
+# without decoding the file:
+#     Claude       U+EC82  cod-claude          Codex   U+EC81  cod-openai
+#     Grok         U+EB72  cod-twitter         Gemini  U+F0AE2 md-star_four_points
+#     Antigravity  U+F14DE md-rocket_launch    Z.AI    U+F0C37 md-alpha_z_circle
+#     Kimi         U+F0C0A md-alpha_k_circle   OpenRouter U+F11E2 md-router
+#     Synthetic    U+F0093 md-flask
+# Every provider needs one: a half-populated table would render a line that is
+# part glyph and part word.
 
 PROVIDERS = [
     {"key": "claude", "title": "Claude Code", "oneline_label": "Claude",
+     "oneline_icon": "\uec82",
      "arg_help": "Only check Claude Code", "fetch": "get_claude_usage",
      "gated": False, "creds": None, "oneline_order": 0,
      "render_oneline": _make_str_pct_renderer("Claude", lambda d: d.get("status") == "ok" or "five_hour" in d, "five_hour", "seven_day")},
     {"key": "codex", "title": "OpenAI Codex", "oneline_label": "Codex",
+     "oneline_icon": "\uec81",
      "arg_help": "Only check Codex", "fetch": "get_codex_usage",
      "gated": False, "creds": None, "oneline_order": 1,
      "render_oneline": _make_str_pct_renderer("Codex", lambda d: d.get("status") == "ok", "primary_window", "secondary_window")},
     {"key": "gemini", "title": "Gemini CLI", "oneline_label": "Gemini",
+     "oneline_icon": "\U000f0ae2",
      "arg_help": "Only check Gemini", "fetch": "get_gemini_usage",
      "gated": False, "creds": None, "oneline_order": 4,
      "render_oneline": _render_gemini},
     {"key": "zai", "title": "Z.AI (5h shared - GLM-4.x)", "oneline_label": "Z.AI",
+     "oneline_icon": "\U000f0c37",
      "arg_help": "Only check Z.AI", "fetch": "get_zai_usage",
      "gated": False, "creds": None, "oneline_order": 2,
      "render_oneline": _render_zai},
     {"key": "openrouter", "title": "OpenRouter", "oneline_label": "OpenRouter",
+     "oneline_icon": "\U000f11e2",
      "arg_help": "Only check OpenRouter", "fetch": "get_openrouter_usage",
      "gated": True, "creds": "get_openrouter_credentials", "oneline_order": 5,
      "render_oneline": _make_balance_renderer("OpenRouter", "balance_usd", lambda d: (d["balance_usd"], f"${d['balance_usd']:.2f}"))},
     {"key": "kimi", "title": "Kimi K2 (Moonshot AI)", "oneline_label": "Kimi",
+     "oneline_icon": "\U000f0c0a",
      "arg_help": "Only check Kimi (Moonshot AI)", "fetch": "get_kimi_usage",
      "gated": True, "creds": "get_kimi_credentials", "oneline_order": 6,
      "render_oneline": _make_balance_renderer("Kimi", "balance", lambda d: (d["balance"], f"{'$' if d.get('currency', 'USD') == 'USD' else '¥'}{d['balance']:.2f}"))},
     {"key": "antigravity", "title": "Google Antigravity", "oneline_label": "Antigravity",
+     "oneline_icon": "\U000f14de",
      "arg_help": "Only check Google Antigravity", "fetch": "get_antigravity_usage",
      "gated": True, "creds": "get_antigravity_credentials", "oneline_order": 7,
      "render_oneline": _render_antigravity},
     {"key": "synthetic", "title": "Synthetic.new", "oneline_label": "Synthetic",
+     "oneline_icon": "\U000f0093",
      "arg_help": "Only check Synthetic.new", "fetch": "get_synthetic_usage",
      "gated": True, "creds": "get_synthetic_credentials", "oneline_order": 3,
      "render_oneline": _render_synthetic},
     {"key": "grok", "title": "Grok (xAI)", "oneline_label": "Grok",
+     "oneline_icon": "\ueb72",
      "arg_help": "Only check Grok (xAI)", "fetch": "get_grok_usage",
      "gated": True, "creds": "get_grok_credentials", "oneline_order": 8,
      "render_oneline": _render_grok},
 ]
 
 
+def _apply_icon_label(rendered: str, label: str, icon: str) -> str:
+    """Swap a renderer's leading ``Label: `` for its single-glyph icon.
+
+    Done here rather than inside the renderers so the label stays a single
+    literal per provider: the shared factories close over their label, so
+    threading an icon through them would mean an extra parameter on five
+    call layers for a purely presentational swap.
+
+    Anchored to the start of the string on purpose — a bare replace would
+    also rewrite the label if it reappeared inside the value (e.g. a future
+    provider whose model names embed its own name).
+    """
+    prefix = f"{label}: "
+    if rendered.startswith(prefix):
+        return f"{icon}: {rendered[len(prefix):]}"
+    return rendered
+
+
 def print_oneline(results: dict, window: str = "5h", use_color: bool = False, cache_age: int | None = None,
-                  show_resets: bool = False, compact: bool = False):
+                  show_resets: bool = False, compact: bool = False, icons: bool = False):
     """Print compact one-liner output"""
     if window not in ("5h", "7d", "both"):
         window = "5h"
@@ -2730,6 +2769,10 @@ def print_oneline(results: dict, window: str = "5h", use_color: bool = False, ca
         data = results[key]
         rendered = p["render_oneline"](data, window, use_color, show_resets)
         if rendered is not None:
+            if icons:
+                # Before _compact_oneline() so its ``": " -> ":"`` tightening
+                # applies to the icon prefix too.
+                rendered = _apply_icon_label(rendered, p["oneline_label"], p["oneline_icon"])
             if compact:
                 rendered = _compact_oneline(rendered)
             if "stale_fallback" in data and not compact:
@@ -2741,7 +2784,8 @@ def print_oneline(results: dict, window: str = "5h", use_color: bool = False, ca
             parts.append(rendered)
         elif "error" in data or data.get("token_status") == "expired":
             separator = ":" if compact else ": "
-            parts.append(f"{p['oneline_label']}{separator}{fail_icon(data)}")
+            label = p["oneline_icon"] if icons else p["oneline_label"]
+            parts.append(f"{label}{separator}{fail_icon(data)}")
 
     line = ("_" if compact else " | ").join(parts)
     if cache_age is not None and not compact:
@@ -2787,6 +2831,7 @@ Examples:
   cclimits --oneline 7d   # Compact one-liner (7d window)
   cclimits --oneline both # Compact one-liner (5h/7d window)
   cclimits --oneline both --resets  # One-liner with reset countdowns (↻3h24m/4d12h)
+  cclimits --oneline both --compact --resets --icons  # Shortest form, Nerd Font glyphs
 
 Example Output:
   # One-liner (5h window)
@@ -2807,6 +2852,9 @@ Example Output:
                         help="Append reset countdowns (↻2h15m) to --oneline output")
     parser.add_argument("--compact", action="store_true",
                         help="Compact --oneline: ceil values, no icons, reset as (7d)/(16h)/(35m)")
+    parser.add_argument("--icons", action="store_true",
+                        help="Replace --oneline provider names with Nerd Font glyphs "
+                             "(requires a patched font; renders as boxes without one)")
     for _p in PROVIDERS:
         parser.add_argument(f"--{_p['key']}", action="store_true", help=_p["arg_help"])
     parser.add_argument("--cached", action="store_true", help="Use cached data if fresh (< TTL), fetch if stale")
@@ -2898,7 +2946,7 @@ Example Output:
     elif args.oneline:
         window = args.oneline if args.oneline in ("5h", "7d", "both") else "5h"
         print_oneline(results, window, use_color=args.noemoji, cache_age=cache_age,
-                      show_resets=args.resets, compact=args.compact)
+                      show_resets=args.resets, compact=args.compact, icons=args.icons)
     else:
         print("\n🔍 AI CLI Usage Checker")
         cached_note = f"  (cached {format_cache_age(cache_age)} ago)" if cache_age is not None else ""

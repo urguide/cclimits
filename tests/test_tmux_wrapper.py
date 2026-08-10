@@ -80,6 +80,35 @@ fi
     assert marker.exists()
 
 
+def test_expired_grok_is_refreshed_when_labeled_by_icon(tmp_path):
+    """--icons renames the Grok label, and the refresh trigger must follow it.
+
+    Matching only the word `Grok` would leave icon users stuck on `expired`
+    until the next manual `grok` run, with no visible sign that the recovery
+    path had silently stopped firing.
+    """
+    grok_icon = "\ueb72"  # cod-twitter, cclimits' --icons label for Grok
+    marker = tmp_path / "refreshed"
+    cclimits = _write_executable(tmp_path / "fake-cclimits", f"""
+if [ -f {marker!s} ]; then
+  printf '{grok_icon}:55%%(7d)\\n'
+else
+  printf '{grok_icon}:expired\\n'
+fi
+""")
+    grok = _write_executable(tmp_path / "fake-grok", f"""
+[ "$1" = models ]
+: > {marker!s}
+""")
+
+    _run_wrapper(tmp_path, cclimits, args="--grok", grok=grok)
+    _wait_for_output(
+        tmp_path, cclimits, args="--grok", grok=grok,
+        expected=f"{grok_icon}:55%(7d)",
+    )
+    assert marker.exists()
+
+
 def test_plain_text_failure_does_not_replace_good_cache(tmp_path):
     """Compact `expired` output receives the same protection as emoji errors."""
     state = tmp_path / "fail"

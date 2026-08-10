@@ -60,6 +60,7 @@ cclimits --oneline both      # Compact one-liner (5h/7d combined)
 cclimits --oneline both --compact # Ceil values; reset shown compactly as (7d)/(16h)/(35m)
 cclimits --oneline --noemoji # Color-coded text instead of emojis
 cclimits --oneline --resets  # Append reset countdowns (alias: --timeremaining)
+cclimits --oneline --icons   # Provider names as Nerd Font glyphs (needs a patched font)
 
 # Caching (for statusline integration)
 cclimits --oneline --cached        # Use cache if fresh (<60s)
@@ -80,6 +81,9 @@ Claude: 4.0%/10.0% ✅ | Codex: 0%/2% ✅ | Z.AI: 1%/16% ✅ | OpenRouter: $47.9
 # Compact tmux-friendly output (--oneline both --compact --resets)
 Claude:4%/10%(3h/4d)_Codex:2%(7d)_Grok:55%(7d)
 
+# Shortest form (--oneline both --compact --resets --icons) - 12 columns narrower
+:4%/10%(3h/4d)_:2%(7d)_:55%(7d)
+
 # During Z.AI peak hours (06:00-10:00 UTC) a ⚡3x quota-rate marker appears
 Z.AI: 1% (5h) ✅ ⚡3x
 
@@ -94,6 +98,31 @@ Z.AI: 1%/16% ✅ ↻3h28m/5d10h
 ```
 
 Status icons: ✅ ok · ⚠️ high usage · ❌ error · 🔑 no credentials found · ⏰ token expired. Cached results (`--cached`) are suffixed with their age, e.g. `(cached 42s)`.
+
+### Provider glyphs (`--icons`)
+
+`--icons` replaces each provider name with a one-column [Nerd Font](https://www.nerdfonts.com/)
+glyph, which is worth roughly 12 columns on a three-provider tmux line. It is
+opt-in: without a patched font every glyph renders as a replacement box, which
+is strictly worse than the word it replaced.
+
+| Provider | Glyph | Codepoint | Nerd Font name |
+|----------|-------|-----------|----------------|
+| Claude | `` | `U+EC82` | `cod-claude` |
+| Codex | `` | `U+EC81` | `cod-openai` |
+| Grok | `` | `U+EB72` | `cod-twitter` |
+| Gemini | `󰫢` | `U+F0AE2` | `md-star_four_points` |
+| Antigravity | `󱓞` | `U+F14DE` | `md-rocket_launch` |
+| Z.AI | `󰰷` | `U+F0C37` | `md-alpha_z_circle` |
+| Kimi | `󰰊` | `U+F0C0A` | `md-alpha_k_circle` |
+| OpenRouter | `󱇢` | `U+F11E2` | `md-router` |
+| Synthetic | `󰂓` | `U+F0093` | `md-flask` |
+
+Verify your font before enabling it — all three should be glyphs, not boxes:
+
+```bash
+printf 'claude=\uec82 openai=\uec81 twitter=\ueb72\n'
+```
 
 Grok's credit period is supplied by xAI and may be weekly or monthly. Example:
 `Grok: 55% (7d) ✅ ↻6d4h`.
@@ -300,12 +329,22 @@ Override via environment variables:
 set -g status-right '#(CCLIMITS_TMUX_TTL=60 CCLIMITS_TMUX_ARGS="--oneline both --resets" ~/.local/bin/cclimits-tmux --watch)'
 ```
 
+To reclaim the columns spent on provider names, add `--icons` (see
+[Provider glyphs](#provider-glyphs---icons)); `set-environment -g` keeps the
+`status-right` line itself readable:
+
+```tmux
+set-environment -g CCLIMITS_TMUX_ARGS "--claude --codex --grok --oneline both --compact --resets --icons"
+set -g status-right '#[fg=cyan]#(~/.local/bin/cclimits-tmux --watch)'
+```
+
 The wrapper keeps a stable last-known-good display cache, so the tmux segment
 does not disappear while a new argument-specific cache is warming up. If Grok's
 session is expired, the background refresh runs `grok models` once and then
 retries cclimits. This delegates refresh-token rotation, locking and credential
 write-back to the official CLI without sending a model prompt or consuming
-Grok Build credits.
+Grok Build credits. That trigger recognises both the `Grok` label and its
+`--icons` glyph, so enabling icons does not disable auto-refresh.
 
 A refresh that reports a *transient* failure — an API error (`ERR`) or an
 expired token (`expired`) — is discarded so it cannot overwrite a good reading.
