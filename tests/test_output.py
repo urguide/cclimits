@@ -551,7 +551,7 @@ class TestPrintOnelineEdgeCases:
 class TestOnelineCompact:
     """Compact mode is optimized for narrow tmux status lines."""
 
-    def test_both_windows_are_integer_without_icons_or_labels(self, capsys):
+    def test_percentages_ceil_and_success_icons_are_removed(self, capsys):
         results = {
             "claude": {
                 "status": "ok",
@@ -564,11 +564,55 @@ class TestOnelineCompact:
             },
         }
         print_oneline(results, "both", compact=True)
-        assert capsys.readouterr().out == "Claude: 3%/42% | Codex: 37%\n"
+        assert capsys.readouterr().out == "Claude:3%/43%_Codex:37%(7d)\n"
 
-    def test_errors_remain_visible(self, capsys):
+    def test_errors_remain_visible_as_text(self, capsys):
         print_oneline({"claude": {"error": "Token expired"}}, "both", compact=True)
-        assert capsys.readouterr().out == "Claude: ⏰\n"
+        assert capsys.readouterr().out == "Claude:expired\n"
+
+    def test_reset_replaces_window_label_with_one_ceil_unit(self, capsys):
+        results = {"grok": {"status": "ok", "credit_usage": {
+            "percentage": 55.1, "period": "7d", "resets_in": "6d 3h",
+        }}}
+        print_oneline(results, "both", compact=True, show_resets=True)
+        assert capsys.readouterr().out == "Grok:56%(7d)\n"
+
+    def test_subday_reset_uses_ceiled_hours(self, capsys):
+        results = {"grok": {"status": "ok", "credit_usage": {
+            "percentage": 55, "period": "7d", "resets_in": "15h 1m",
+        }}}
+        print_oneline(results, "both", compact=True, show_resets=True)
+        assert capsys.readouterr().out == "Grok:55%(16h)\n"
+
+    def test_subhour_reset_uses_minutes(self, capsys):
+        results = {"grok": {"status": "ok", "credit_usage": {
+            "percentage": 55, "period": "7d", "resets_in": "35m",
+        }}}
+        print_oneline(results, "both", compact=True, show_resets=True)
+        assert capsys.readouterr().out == "Grok:55%(35m)\n"
+
+    def test_dual_resets_each_use_one_ceil_unit(self, capsys):
+        results = {"claude": {
+            "status": "ok",
+            "five_hour": {"used": "98.1%", "resets_in": "3h 16m"},
+            "seven_day": {"used": "46.1%", "resets_in": "1d 20h"},
+        }}
+        print_oneline(results, "both", compact=True, show_resets=True)
+        assert capsys.readouterr().out == "Claude:99%/47%(4h/2d)\n"
+
+    def test_missing_credentials_use_plain_text(self, capsys):
+        print_oneline({"grok": {"error": "No credentials found"}}, "both", compact=True)
+        assert capsys.readouterr().out == "Grok:no key\n"
+
+    def test_compact_hides_stale_and_cached_age(self, capsys):
+        results = {"grok": {
+            "status": "ok",
+            "credit_usage": {"percentage": 55, "period": "7d", "resets_in": "6d"},
+            "stale_fallback": True,
+            "stale_age_seconds": 90,
+        }}
+        print_oneline(results, "both", compact=True, show_resets=True, cache_age=30)
+        assert capsys.readouterr().out == "Grok:55%(6d)\n"
 
 
 class TestOnelineSingleWindowDegradation:

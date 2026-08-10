@@ -11,7 +11,7 @@
 - **Kimi K2 (Moonshot)**: API token from env var (`$MOONSHOT_API_KEY`), prepaid balance tracking
 - **Synthetic.new**: API token from env var (`$SYNTHETIC_API_KEY`), reports subscription/rolling-5h/weekly-credits buckets via `GET /v2/quotas` (free probe)
 - **Grok (xAI)**: OAuth token read (read-only, never written) from the scope-keyed `~/.grok/auth.json` or `$GROK_ACCESS_TOKEN`; coding-credit usage from the official CLI's internal `/v1/billing?format=credits` endpoint, including total/per-product percentage, weekly/monthly reset, prepaid and on-demand fields. Live-verified: 55% total = GrokBuild 53% + GrokChat 2%
-- **Display modes**: JSON, detailed, compact one-liner, noemoji color mode, and `--compact` integer/icon-free statusline mode; oneline distinguishes 🔑 no credentials / ⏰ expired token / ❌ real error
+- **Display modes**: JSON, detailed, compact one-liner, noemoji color mode, and `--compact` icon-free statusline mode; compact percentages use ceiling (never under-report), reset countdowns collapse to one ceiled unit (`7d` / `16h` / `35m`; dual windows `4h/2d`), cache/stale age tags are hidden, providers use a tight underscore separator (`Claude:99%_Grok:55%`), and failures render as plain `no key` / `expired` / `ERR`
 - **Time windows**: 5h and 7d for Claude/Codex (Codex windows classified by `limit_window_seconds`, not slot position — weekly-only accounts return one window in the primary slot; renderer degrades gracefully to whichever window exists), 5h for Z.AI (shared across GLM models; `both` mode shows tokens%/monthly-MCP%, `--resets` there shows both countdowns), 5h rolling + weekly credits for Synthetic.new
 - **Reset countdowns** (`--resets`, alias `--timeremaining`): appends `↻` countdowns per provider in oneline; Grok uses its server-supplied weekly/monthly credit-period end, Antigravity shows its earliest model reset, and prepaid-balance providers have nothing to reset
 - **Caching** (`--cached`, `~/.cache/cclimits/usage.json`): atomic writes (temp + rename), merge on write (no-creds/partial runs preserve prior good entries), provider filters honored on cache hits (refetch if a requested provider is missing), output labeled with cache age
@@ -29,7 +29,7 @@
 - ✅ Providers fetched concurrently; cache hits skip all network/credential calls; transient failures fall back to <24h-old cached data with stale marker (v1.3.0)
 - ✅ Data-driven `PROVIDERS` registry — adding a provider is one registry entry + one fetch function
 - ✅ Claude/Codex OAuth tokens self-heal: expiry- and 401-driven refresh, atomic 0600 write-back to the vendor's own credential file, `flock`-serialized plus interop with Claude Code's own `.oauth_refresh.lock`, opt-out via `CCLIMITS_NO_TOKEN_REFRESH=1`
-- ✅ CI (GitHub Actions matrix) + automated npm publish on `v*` tags via Trusted Publishing (OIDC); 281 tests
+- ✅ CI (GitHub Actions matrix) + automated npm publish on `v*` tags via Trusted Publishing (OIDC); 287 tests
 
 ## Known Issues
 

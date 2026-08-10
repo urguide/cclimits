@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -2504,11 +2505,38 @@ def _fmt_balance(label, balance_str, balance, use_color):
 
 
 def _compact_oneline(rendered: str) -> str:
-    """Remove status decoration and round percentages for tight status lines."""
-    rendered = re.sub(r"(\d+(?:\.\d+)?)%", lambda m: f"{round(float(m.group(1)))}%", rendered)
-    rendered = re.sub(r" \((?:5h|7d)\)", "", rendered)
+    """Ceil values and reduce reset countdowns to one parenthesized unit."""
+    rendered = re.sub(
+        r"(\d+(?:\.\d+)?)%",
+        lambda m: f"{math.ceil(float(m.group(1)))}%",
+        rendered,
+    )
     for icon in (" ✅", " ⚠️", " 🔴", " ❌"):
         rendered = rendered.replace(icon, "")
+    rendered = rendered.replace("🔑", "no key").replace("⏰", "expired").replace("❌", "ERR")
+
+    def compact_reset(value: str) -> str:
+        match = re.fullmatch(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?", value)
+        if not match:
+            return value
+        days, hours, minutes = (int(v or 0) for v in match.groups())
+        total_minutes = days * 1440 + hours * 60 + minutes
+        if total_minutes >= 1440:
+            return f"{math.ceil(total_minutes / 1440)}d"
+        if total_minutes >= 60:
+            return f"{math.ceil(total_minutes / 60)}h"
+        return f"{max(1, total_minutes)}m"
+
+    reset_match = re.search(r" ↻([0-9dhm/]+)", rendered)
+    if reset_match:
+        compacted = "/".join(compact_reset(v) for v in reset_match.group(1).split("/"))
+        rendered = rendered[:reset_match.start()] + f" ({compacted})" + rendered[reset_match.end():]
+        # The reset countdown supersedes the provider's static window label.
+        rendered = re.sub(r" \((?:5h|7d|monthly)\)(?= \([0-9dhm/]+\)$)", "", rendered)
+    # Tight tmux form: Label:99%(4h), while preserving semantic spaces inside
+    # error text such as "no key".
+    rendered = re.sub(r":\s+", ":", rendered, count=1)
+    rendered = re.sub(r"\s+(?=\()", "", rendered)
     return rendered.rstrip()
 
 
@@ -2683,9 +2711,9 @@ def print_oneline(results: dict, window: str = "5h", use_color: bool = False, ca
         window = "5h"
 
     parts = []
-    error_icon = f"{COLORS['bold_red']}ERR{COLORS['reset']}" if use_color else "❌"
-    nokey_icon = f"{COLORS['yellow']}no key{COLORS['reset']}" if use_color else "🔑"
-    expired_icon = f"{COLORS['yellow']}expired{COLORS['reset']}" if use_color else "⏰"
+    error_icon = f"{COLORS['bold_red']}ERR{COLORS['reset']}" if use_color else "ERR" if compact else "❌"
+    nokey_icon = f"{COLORS['yellow']}no key{COLORS['reset']}" if use_color else "no key" if compact else "🔑"
+    expired_icon = f"{COLORS['yellow']}expired{COLORS['reset']}" if use_color else "expired" if compact else "⏰"
 
     def fail_icon(data: dict) -> str:
         """Missing credentials / expired tokens are config issues, not outages — show them differently"""
@@ -2704,7 +2732,7 @@ def print_oneline(results: dict, window: str = "5h", use_color: bool = False, ca
         if rendered is not None:
             if compact:
                 rendered = _compact_oneline(rendered)
-            if "stale_fallback" in data:
+            if "stale_fallback" in data and not compact:
                 age = data.get("stale_age_seconds", 0)
                 tag = f"(stale {format_cache_age(age)})"
                 if use_color:
@@ -2712,10 +2740,11 @@ def print_oneline(results: dict, window: str = "5h", use_color: bool = False, ca
                 rendered = f"{rendered} {tag}"
             parts.append(rendered)
         elif "error" in data or data.get("token_status") == "expired":
-            parts.append(f"{p['oneline_label']}: {fail_icon(data)}")
+            separator = ":" if compact else ": "
+            parts.append(f"{p['oneline_label']}{separator}{fail_icon(data)}")
 
-    line = " | ".join(parts)
-    if cache_age is not None:
+    line = ("_" if compact else " | ").join(parts)
+    if cache_age is not None and not compact:
         line += f" (cached {format_cache_age(cache_age)})"
     print(line)
 
@@ -2777,7 +2806,7 @@ Example Output:
     parser.add_argument("--resets", "--timeremaining", action="store_true", dest="resets",
                         help="Append reset countdowns (↻2h15m) to --oneline output")
     parser.add_argument("--compact", action="store_true",
-                        help="Compact --oneline output: integer percentages, no window labels or status icons")
+                        help="Compact --oneline: ceil values, no icons, reset as (7d)/(16h)/(35m)")
     for _p in PROVIDERS:
         parser.add_argument(f"--{_p['key']}", action="store_true", help=_p["arg_help"])
     parser.add_argument("--cached", action="store_true", help="Use cached data if fresh (< TTL), fetch if stale")

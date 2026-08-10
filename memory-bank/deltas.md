@@ -9,7 +9,9 @@
 - **Read-only by design**: unlike Claude/Codex, cclimits never refreshes or writes `~/.grok/auth.json`. Grok's token lives ~6h and the CLI rotates it itself; there was no evidence of what else the file's `auth.json.lock` guards, so writing was not worth the risk of stranding the user's CLI. An expired token short-circuits locally (no pointless HTTP round trip) and reports `token_status: expired`.
 - **Reports**: credit usage + reset, per-product split, balances, plan (`subscriptionTier`), account email, `hasGrokCodeAccess`, team, block reason, and access-token countdown. Reuses the existing shared `📊 Plan:` / `👤 Account:` / `⏱️ Token expires in:` renderers.
 - **Test isolation gap found & fixed**: `grok` is gated, and `isolated_credentials` didn't cover `~/.grok`, so on a logged-in dev machine the real account switched the provider on mid-test and broke the canonical-order assertion. The fixture now patches `GROK_AUTH_PATHS` / `GROK_MODELS_CACHE_PATHS` and clears `GROK_ACCESS_TOKEN`.
-- **Tests**: 281 total — Grok coverage includes scoped-key parsing, installed-version discovery/env override, exact required headers, weekly/monthly periods, current + legacy response shapes, product split, settings/user metadata enrichment, 401/403 non-transient vs 503 transient, expired short-circuit, opaque non-JWT tokens, detailed output and oneline/reset rendering.
+- **Tests**: 287 total — Grok coverage includes scoped-key parsing, installed-version discovery/env override, exact required headers, weekly/monthly periods, current + legacy response shapes, product split, settings/user metadata enrichment, 401/403 non-transient vs 503 transient, expired short-circuit, opaque non-JWT tokens, detailed output and oneline/reset rendering; compact tests lock ceiling, plain-text errors, day/hour/minute reset collapsing, tight spacing and hidden cache age.
+- **Compact/tmux follow-up**: `--compact` now uses ceiling instead of Python's `round()` (`42.1%` → `43%`) and removes all pictorial status icons. With `--resets`, countdowns collapse to one ceiled unit in parentheses: at least a day → `(7d)`, under a day → `(16h)`, under an hour → `(35m)`; dual windows use `(4h/2d)`. The countdown replaces the static period label, avoiding `(7d) (7d)`. Failures are plain text (`no key`, `expired`, `ERR`). The wrapper and `~/.tmux.conf` defaults include Grok and `--resets`.
+- **Compact spacing/cache follow-up**: compact output hides `(stale ...)` and `(cached ...)` age tags and removes all structural padding: `Claude:99%/47%(4h/2d)_Codex:9%(7d)_Grok:55%(7d)`. Providers use `_` as the separator; semantic space inside `no key` is preserved.
 - **Files**: `lib/cclimits.py`, `tests/test_credentials.py`, `tests/test_usage.py`, `tests/test_output.py`, `tests/test_cli.py`, `tests/conftest.py`, `README.md`, `CLAUDE.md`, `package.json`, `memory-bank/deltas.md`, `memory-bank/progress.md`, `memory-bank/systemPatterns.md`, `memory-bank/activeContext.md`
 
 ## 2026-08-06: Claude & Codex OAuth Token Auto-Refresh with Write-Back
@@ -27,8 +29,8 @@
 
 ## 2026-08-04: Compact Oneline Output for tmux
 
-- Added `--compact` for narrow status lines: percentages are rounded to integers, `(5h)` / `(7d)` labels and successful-status icons are omitted, while authentication/API errors remain visible.
-- The tmux wrapper now defaults to `--claude --codex --oneline both --compact`, producing output such as `Claude: 3%/42% | Codex: 37%`.
+- Added `--compact` for narrow status lines. Its original behavior rounded percentages and omitted period labels; as of 2026-08-10 it instead uses ceiling, preserves period/reset labels, and removes pictorial icons.
+- The tmux wrapper originally defaulted to Claude/Codex only; as of 2026-08-10 it also includes Grok and `--resets`.
 - Added output and CLI regression tests and updated the README tmux defaults.
 - Files: `lib/cclimits.py`, `bin/cclimits-tmux`, `tests/test_output.py`, `tests/test_cli.py`, `README.md`, `memory-bank/deltas.md`, `memory-bank/progress.md`
 

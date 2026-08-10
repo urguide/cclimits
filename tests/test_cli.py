@@ -237,7 +237,7 @@ class TestOnelineOutput:
     @patch('cclimits.get_codex_usage')
     @patch('sys.argv', ['cclimits', '--claude', '--codex', '--oneline', 'both', '--compact'])
     def test_oneline_compact_flag(self, mock_codex, mock_claude, capsys):
-        """--compact emits integer percentages without status decoration."""
+        """--compact ceils percentages, keeps window labels, and removes icons."""
         mock_claude.return_value = {
             "status": "ok",
             "five_hour": {"used": "3.0%"},
@@ -245,7 +245,7 @@ class TestOnelineOutput:
         }
         mock_codex.return_value = {"status": "ok", "secondary_window": {"used": "37%"}}
         main()
-        assert capsys.readouterr().out == "Claude: 3%/42% | Codex: 37%\n"
+        assert capsys.readouterr().out == "Claude:3%/43%_Codex:37%(7d)\n"
 
     @patch('cclimits.get_claude_usage')
     @patch('cclimits.get_codex_usage')
