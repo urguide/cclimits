@@ -17,11 +17,25 @@
 #
 # Environment overrides:
 #   CCLIMITS_TMUX_TTL    refresh interval in seconds (default: 180)
+#   CCLIMITS_TMUX_WATCH_INTERVAL  status emission interval (default: 2)
 #   CCLIMITS_TMUX_ARGS   cclimits arguments (default: --claude --codex --grok --oneline both --compact --resets)
 #   CCLIMITS_BIN         path to the cclimits executable
 #   GROK_BIN             path to the official Grok executable (default: grok)
 
 set -u
+
+# tmux's #() formatter is most stable with a long-running command: it retains
+# the last complete output line until the process emits a replacement. A
+# short-lived command is restarted on status redraws and some tmux versions
+# temporarily render an empty result between job start and exit, causing a
+# visible on/off flicker even when the command itself takes only milliseconds.
+if [ "${1:-}" = "--watch" ]; then
+  WATCH_INTERVAL=${CCLIMITS_TMUX_WATCH_INTERVAL:-2}
+  while :; do
+    "$0"
+    sleep "$WATCH_INTERVAL"
+  done
+fi
 
 TTL=${CCLIMITS_TMUX_TTL:-180}
 ARGS=${CCLIMITS_TMUX_ARGS:---claude --codex --grok --oneline both --compact --resets}

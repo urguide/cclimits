@@ -256,16 +256,17 @@ Grok's credit period is supplied by xAI and may be weekly or monthly. Example:
 `bin/cclimits-tmux` shows your usage in the tmux status line — on the same row as
 your window tabs.
 
-tmux runs `#(...)` **synchronously**, so calling `cclimits` directly freezes the
-whole status line while it waits on the API (~0.6s). The wrapper avoids this: it
-prints the cached value instantly and refreshes in the background only when the
-cache is stale.
+Calling `cclimits` directly from `#(...)` makes the status wait on the API. The
+wrapper instead runs as a long-lived status producer: it emits the cached value
+every two seconds and refreshes API data in the background only when stale.
+Keeping the job alive avoids tmux 3.7b briefly rendering an empty result while
+repeatedly restarting a short-lived status command.
 
 Add to `~/.tmux.conf`:
 
 ```tmux
 set -g status-right-length 150
-set -g status-right '#[fg=cyan]#(~/.local/bin/cclimits-tmux)'
+set -g status-right '#[fg=cyan]#(~/.local/bin/cclimits-tmux --watch)'
 ```
 
 Reload with `tmux source-file ~/.tmux.conf`. Result in the top/bottom right:
@@ -278,7 +279,7 @@ To keep an existing status-right (e.g. [gitmux](https://github.com/arl/gitmux)),
 put both in one option — tmux only honours the last `status-right` it reads:
 
 ```tmux
-set -g status-right '#[fg=cyan]#(~/.local/bin/cclimits-tmux)#[fg=default,bg=default]  #(gitmux "#{pane_current_path}")'
+set -g status-right '#[fg=cyan]#(~/.local/bin/cclimits-tmux --watch)#[fg=default,bg=default]  #(gitmux "#{pane_current_path}")'
 ```
 
 ### Configuration
@@ -288,13 +289,14 @@ Override via environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CCLIMITS_TMUX_TTL` | `180` | Seconds before the cache is refreshed |
+| `CCLIMITS_TMUX_WATCH_INTERVAL` | `2` | Seconds between complete status-line emissions |
 | `CCLIMITS_TMUX_ARGS` | `--claude --codex --grok --oneline both --compact --resets` | Arguments passed to `cclimits` |
 | `CCLIMITS_BIN` | auto-detected | Path to the `cclimits` executable |
 | `GROK_BIN` | `grok` | Official Grok executable used for safe session refresh |
 
 ```tmux
 # Refresh every 60s, show all providers with reset countdowns
-set -g status-right '#(CCLIMITS_TMUX_TTL=60 CCLIMITS_TMUX_ARGS="--oneline both --resets" ~/.local/bin/cclimits-tmux)'
+set -g status-right '#(CCLIMITS_TMUX_TTL=60 CCLIMITS_TMUX_ARGS="--oneline both --resets" ~/.local/bin/cclimits-tmux --watch)'
 ```
 
 The wrapper keeps a stable last-known-good display cache, so the tmux segment

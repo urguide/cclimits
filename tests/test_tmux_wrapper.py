@@ -101,3 +101,36 @@ fi
     _run_wrapper(tmp_path, cclimits, args="--grok")
     time.sleep(0.2)
     assert _run_wrapper(tmp_path, cclimits, args="--grok").strip() == "Grok:55%(7d)"
+
+
+def test_watch_mode_keeps_emitting_complete_lines(tmp_path):
+    """Long-running tmux mode must never alternate a valid line with blank output."""
+    cclimits = _write_executable(
+        tmp_path / "fake-cclimits", "printf 'Claude:10%%(2h)_Grok:20%%(3d)\\n'\n",
+    )
+    env = os.environ.copy()
+    env.update({
+        "TMPDIR": str(tmp_path),
+        "CCLIMITS_BIN": str(cclimits),
+        "CCLIMITS_TMUX_ARGS": "--test",
+        "CCLIMITS_TMUX_TTL": "3600",
+        "CCLIMITS_TMUX_WATCH_INTERVAL": "0.05",
+    })
+    proc = subprocess.Popen(
+        ["bash", str(WRAPPER), "--watch"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        lines = []
+        while len(lines) < 4 and time.monotonic() < deadline:
+            line = proc.stdout.readline().strip()
+            if line:
+                lines.append(line)
+        assert lines == ["Claude:10%(2h)_Grok:20%(3d)"] * 4
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
