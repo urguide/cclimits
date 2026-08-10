@@ -531,7 +531,7 @@ class TestCachedBypassFix:
         self, mock_claude, mock_codex, mock_gemini, mock_zai,
         mock_or_creds, mock_kimi_creds, mock_ag_creds, mock_syn_creds,
         mock_or_usage, mock_kimi_usage, mock_ag_usage, mock_syn_usage, capsys):
-        """Cache hit: zero usage fetches and zero credential probing for all 8 providers."""
+        """Cache hit: zero usage fetches and zero credential probing."""
         import cclimits
         cclimits.write_cache({
             "claude": {"status": "ok", "five_hour": {"used": "45.5%"}},
@@ -612,10 +612,12 @@ class TestCachedBypassFix:
 class TestParallelFetch:
     """Tests for concurrent provider fetching via ThreadPoolExecutor."""
 
+    @patch('cclimits.get_grok_credentials', return_value={"access_token": "fake"})
     @patch('cclimits.get_synthetic_credentials', return_value="fake_key")
     @patch('cclimits.get_antigravity_credentials', return_value={"access_token": "fake"})
     @patch('cclimits.get_kimi_credentials', return_value="fake_key")
     @patch('cclimits.get_openrouter_credentials', return_value="fake_key")
+    @patch('cclimits.get_grok_usage')
     @patch('cclimits.get_synthetic_usage')
     @patch('cclimits.get_antigravity_usage')
     @patch('cclimits.get_kimi_usage')
@@ -627,8 +629,9 @@ class TestParallelFetch:
     @patch('sys.argv', ['cclimits', '--json'])
     def test_canonical_order_all_providers(
             self, mock_claude, mock_codex, mock_gemini, mock_zai,
-            mock_or, mock_kimi, mock_ag, mock_syn,
-            mock_or_creds, mock_kimi_creds, mock_ag_creds, mock_syn_creds, capsys):
+            mock_or, mock_kimi, mock_ag, mock_syn, mock_grok,
+            mock_or_creds, mock_kimi_creds, mock_ag_creds, mock_syn_creds,
+            mock_grok_creds, capsys):
         """All selected providers are fetched and results appear in canonical order."""
         mock_claude.return_value = {"status": "ok", "p": 1}
         mock_codex.return_value = {"status": "ok", "p": 2}
@@ -638,6 +641,7 @@ class TestParallelFetch:
         mock_kimi.return_value = {"status": "ok", "p": 6}
         mock_ag.return_value = {"status": "ok", "p": 7}
         mock_syn.return_value = {"status": "ok", "p": 8}
+        mock_grok.return_value = {"status": "ok", "p": 9}
 
         main()
 
@@ -647,7 +651,7 @@ class TestParallelFetch:
         # Keys must appear in canonical provider order
         assert list(result.keys()) == [
             "claude", "codex", "gemini", "zai",
-            "openrouter", "kimi", "antigravity", "synthetic",
+            "openrouter", "kimi", "antigravity", "synthetic", "grok",
         ]
         # Every usage function should have been called exactly once
         mock_claude.assert_called_once()
@@ -658,6 +662,7 @@ class TestParallelFetch:
         mock_kimi.assert_called_once()
         mock_ag.assert_called_once()
         mock_syn.assert_called_once()
+        mock_grok.assert_called_once()
 
     @patch('cclimits.get_claude_usage')
     @patch('cclimits.get_codex_usage')

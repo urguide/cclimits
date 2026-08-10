@@ -2,11 +2,16 @@
 Tests for API usage functions (mock both credentials and HTTP).
 """
 
+import base64
 import json
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock, call
 import pytest
 from cclimits import (
+    get_grok_usage,
+    NO_CREDS_ERROR,
+    _is_transient_error,
     get_claude_usage,
     get_codex_usage,
     get_gemini_usage,
@@ -578,3 +583,218 @@ class TestZaiSparseQuota:
 
         assert result["error"] == "Could not fetch usage"
         assert "status" not in result
+
+
+def _grok_jwt(exp: float) -> str:
+    """Unsigned JWT carrying just an ``exp`` claim (only the payload is read)."""
+    def seg(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+    return f"{seg({'alg': 'none'})}.{seg({'exp': int(exp), 'tier': 1})}.sig"
+
+
+class TestGetGrokUsage:
+    """Tests for Grok Build's internal credits/billing API."""
+
+    def _creds(self, exp_offset=3600):
+        return {"access_token": _grok_jwt(time.time() + exp_offset),
+                "entry": {"user_id": "user-123", "email": "user@example.com"},
+                "source": "grok-cli"}
+
+    @patch('cclimits.get_grok_credentials')
+    @patch('cclimits.http_get')
+    def test_successful_weekly_credits(self, mock_get, mock_creds):
+        mock_creds.return_value = self._creds(exp_offset=7200)
+        mock_get.return_value = (200, {
+            "config": {
+                "creditUsagePercent": 55.0,
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2099-08-09T07:30:57Z",
+                    "end": "2099-08-16T07:30:57Z",
+                },
+                "productUsage": [
+                    {"product": "GrokBuild", "usagePercent": 53.0},
+                    {"product": "GrokChat", "usagePercent": 2.0},
+                    {"product": "GrokImagine"},
+                ],
+                "onDemandCap": {"val": 1200},
+                "onDemandUsed": {"val": 250},
+                "prepaidBalance": {"val": 500},
+                "isUnifiedBillingUser": True,
+                "topUpMethod": "TOP_UP_METHOD_SAVED_PAYMENT_METHOD",
+            },
+            "onDemandEnabled": True,
+            "subscriptionTier": "SuperGrok",
+        })
+
+        result = get_grok_usage()
+
+        assert result["status"] == "ok"
+        assert result["plan"] == "SuperGrok"
+        assert result["account"] == "user@example.com"
+        assert result["credit_usage"]["percentage"] == 55.0
+        assert result["credit_usage"]["period"] == "7d"
+        assert result["credit_usage"]["resets_in"] != "N/A"
+        assert result["product_usage"] == [
+            {"product": "GrokBuild", "percentage": 53.0},
+            {"product": "GrokChat", "percentage": 2.0},
+            {"product": "GrokImagine", "percentage": 0.0},
+        ]
+        assert result["prepaid_balance_usd"] == 5.0
+        assert result["on_demand_cap_usd"] == 12.0
+        assert result["on_demand_used_usd"] == 2.5
+        assert result["on_demand_enabled"] is True
+        assert result["unified_billing"] is True
+        assert result["token_expires_in"].endswith("m")
+
+        url, headers = mock_get.call_args_list[0].args
+        assert url.endswith("/billing?format=credits")
+        assert headers["X-XAI-Token-Auth"] == "xai-grok-cli"
+        assert headers["x-userid"] == "user-123"
+        assert headers["x-grok-client-mode"] == "interactive"
+        assert "x-grok-client-version" in headers
+
+    @patch('cclimits.get_grok_credentials')
+    @patch('cclimits.http_get')
+    def test_settings_endpoint_enriches_raw_billing_response(self, mock_get, mock_creds):
+        mock_creds.return_value = self._creds()
+        mock_get.side_effect = [
+            (200, {"config": {"creditUsagePercent": 42.5}}),
+            (200, {
+                "subscription_tier_display": "SuperGrok",
+                "on_demand_enabled": True,
+            }),
+        ]
+
+        result = get_grok_usage()
+
+        assert result["account"] == "user@example.com"
+        assert result["plan"] == "SuperGrok"
+        assert result["on_demand_enabled"] is True
+        assert mock_get.call_args_list[1].args[0].endswith("/settings")
+
+    @patch('cclimits.get_grok_credentials')
+    @patch('cclimits.http_get')
+    def test_user_endpoint_enriches_env_token(self, mock_get, mock_creds):
+        mock_creds.return_value = {"access_token": "opaque", "entry": {}, "source": "GROK_ACCESS_TOKEN"}
+        mock_get.side_effect = [
+            (200, {
+                "config": {"creditUsagePercent": 42.5},
+                "subscriptionTier": "SuperGrok",
+                "onDemandEnabled": False,
+            }),
+            (200, {
+                "email": "server@example.com",
+                "hasGrokCodeAccess": True,
+                "teamName": "Acme",
+                "userBlockedReason": "payment_required",
+            }),
+        ]
+
+        result = get_grok_usage()
+
+        assert result["account"] == "server@example.com"
+        assert result["cli_access"] is True
+        assert result["team"] == "Acme"
+        assert result["blocked_reason"] == "payment_required"
+
+    @patch('cclimits.get_grok_credentials')
+    @patch('cclimits.http_get')
+    def test_monthly_period_and_legacy_percent_fallback(self, mock_get, mock_creds):
+        mock_creds.return_value = self._creds()
+        mock_get.return_value = (200, {"config": {
+            "monthlyLimit": {"val": 10000},
+            "used": {"val": 2750},
+            "currentPeriod": {
+                "type": "USAGE_PERIOD_TYPE_MONTHLY",
+                "end": "2099-09-01T00:00:00Z",
+            },
+        }, "subscriptionTier": "SuperGrok"})
+
+        result = get_grok_usage()
+
+        assert result["credit_usage"]["percentage"] == 27.5
+        assert result["credit_usage"]["period"] == "monthly"
+
+    @patch('cclimits.get_grok_credentials')
+    @patch('cclimits.http_get')
+    def test_missing_usage_percent_still_reports_account(self, mock_get, mock_creds):
+        mock_creds.return_value = self._creds()
+        mock_get.return_value = (200, {"config": {}, "subscriptionTier": "SuperGrok"})
+
+        result = get_grok_usage()
+
+        assert result["status"] == "ok"
+        assert "credit_usage" not in result
+
+    @patch('cclimits.get_grok_credentials', return_value=None)
+    def test_no_credentials(self, mock_creds):
+        result = get_grok_usage()
+
+        # Must be the exact shared literal so --oneline shows the key icon
+        assert result["error"] == NO_CREDS_ERROR
+        assert "grok login" in result["hint"]
+
+    @patch('cclimits.get_grok_credentials')
+    @patch('cclimits.http_get')
+    def test_expired_token_short_circuits(self, mock_get, mock_creds):
+        """An expired JWT is reported locally — no pointless HTTP round trip."""
+        mock_creds.return_value = self._creds(exp_offset=-60)
+
+        result = get_grok_usage()
+
+        assert result["token_status"] == "expired"
+        assert result["error"] == "Token expired"
+        mock_get.assert_not_called()
+
+    @patch('cclimits.get_grok_credentials')
+    @patch('cclimits.http_get')
+    def test_unauthorized(self, mock_get, mock_creds):
+        mock_creds.return_value = self._creds()
+        mock_get.return_value = (401, "unauthorized")
+
+        assert get_grok_usage()["error"] == "Invalid API key"
+
+    @patch('cclimits.get_grok_credentials')
+    @patch('cclimits.http_get')
+    def test_forbidden(self, mock_get, mock_creds):
+        mock_creds.return_value = self._creds()
+        mock_get.return_value = (403, "forbidden")
+
+        assert get_grok_usage()["error"] == "Forbidden"
+
+    @patch('cclimits.get_grok_credentials')
+    @patch('cclimits.http_get')
+    def test_server_error_is_transient(self, mock_get, mock_creds):
+        """Generic failures keep the 'API error (N)' shape so stale fallback applies."""
+        mock_creds.return_value = self._creds()
+        mock_get.return_value = (503, "upstream down")
+
+        result = get_grok_usage()
+
+        assert result["error"] == "API error (503)"
+        assert _is_transient_error(result) is True
+
+    @patch('cclimits.get_grok_credentials')
+    @patch('cclimits.http_get')
+    def test_auth_errors_are_not_transient(self, mock_get, mock_creds):
+        """401/403 must suppress stale fallback — re-login is required, not a retry."""
+        mock_creds.return_value = self._creds()
+        mock_get.return_value = (401, "unauthorized")
+
+        assert _is_transient_error(get_grok_usage()) is False
+
+    @patch('cclimits.get_grok_credentials')
+    @patch('cclimits.http_get')
+    def test_opaque_token_still_queries(self, mock_get, mock_creds):
+        """A non-JWT token (env var) has no exp claim; don't treat that as expired."""
+        mock_creds.return_value = {"access_token": "opaque", "entry": {}, "source": "GROK_ACCESS_TOKEN"}
+        mock_get.return_value = (200, {
+            "config": {"creditUsagePercent": 10},
+            "subscriptionTier": "GrokPro",
+        })
+
+        result = get_grok_usage()
+
+        assert result["status"] == "ok"
+        assert "token_expires_in" not in result

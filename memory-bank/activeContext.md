@@ -2,10 +2,13 @@
 
 ## Current Focus
 
-- v1.3.0 released 2026-07-12 via the new automated pipeline; back to maintenance
+- Maintenance + provider coverage; `package.json` is at 1.5.0 (activeContext previously lagged at 1.3.0)
 - Researching additional AI coding providers (Cursor, Copilot, Replit, etc.)
 
 ## Recent Changes (Last 7 Days)
+
+- **2026-08-10**: **Grok (xAI) coding-credit usage added.** Official `xai-org/grok-build` source revealed the internal `/v1/billing?format=credits` endpoint and its required session/user/version headers; live account probe returned total + per-product percentages and a weekly reset. Grok now appears in oneline (`Grok: 55% (7d)`) and detailed/JSON output. `~/.grok/auth.json` remains read-only. Also closed a test-isolation gap where a logged-in developer's real Grok account changed the provider set during tests. 255 → 281 tests
+- **2026-08-06**: Claude & Codex OAuth token auto-refresh with write-back to the vendor credential files, interop-locked against Claude Code's own `.oauth_refresh.lock`
 
 - **2026-07-12**: **v1.3.0 released** — first release through the new tag-push pipeline (npm Trusted Publishing/OIDC, provenance attested). Five changes in one release, see `deltas.md`: cache-hit bypass bug fix (openrouter/kimi/antigravity/synthetic no longer fetch live on cache hits), concurrent provider fetching (ThreadPoolExecutor; wall time ≈ slowest provider), GitHub Actions CI (3.9/3.11/3.13 × requests/urllib matrix) + automated publish, data-driven `PROVIDERS` registry refactor (byte-identical output, −93 lines), stale-cache fallback (transient failures serve <24h-old good entries with stale marker). Suite: 155 → 205 tests
 - Publishing gotchas hit and fixed: `setup-node` `registry-url` breaks the OIDC exchange (E404); newer npm strips `./`-prefixed bin paths at publish (would have broken `npx cclimits`) — `npm pkg fix` applied

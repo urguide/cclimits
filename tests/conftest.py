@@ -31,10 +31,18 @@ def isolated_credentials(tmp_path, monkeypatch):
     ~/.codex.  A test that mocks only http_get would otherwise reach the real
     files, so every test starts with those paths pointing at an empty temp
     directory.  Tests that need credentials override these with their own.
+
+    ~/.grok is read-only for us (Grok has no refresh write-back), but a
+    developer who is logged into the Grok CLI would otherwise turn the gated
+    provider on mid-test and change which providers get fetched.
     """
     cred_dir = tmp_path / "cli-credentials"
     monkeypatch.setattr(cclimits, "CLAUDE_CRED_PATHS", [cred_dir / ".credentials.json"])
     monkeypatch.setattr(cclimits, "CODEX_AUTH_PATHS", [cred_dir / "auth.json"])
+    monkeypatch.setattr(cclimits, "GROK_AUTH_PATHS", [cred_dir / "grok-auth.json"])
+    monkeypatch.setattr(cclimits, "GROK_MODELS_CACHE_PATHS", [cred_dir / "models-cache.json"])
+    for var in ("GROK_ACCESS_TOKEN", "GROK_CLIENT_VERSION"):
+        monkeypatch.delenv(var, raising=False)
 
 
 @pytest.fixture

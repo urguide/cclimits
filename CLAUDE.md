@@ -4,7 +4,7 @@ Project instructions for Claude Code when working in this repository.
 
 ## Quick Orientation
 
-**cclimits** is a CLI tool that checks quota/usage for AI coding assistants (Claude Code, OpenAI Codex, Google Gemini CLI, Google Antigravity, Z.AI, Kimi/Moonshot, OpenRouter, Synthetic.new). Distributed via npm, runs Python under the hood.
+**cclimits** is a CLI tool that checks quota/usage for AI coding assistants (Claude Code, OpenAI Codex, Google Gemini CLI, Google Antigravity, Z.AI, Kimi/Moonshot, OpenRouter, Synthetic.new, Grok/xAI). Distributed via npm, runs Python under the hood.
 
 **Repository**: https://github.com/cruzanstx/cclimits
 **npm**: https://www.npmjs.com/package/cclimits
@@ -116,6 +116,7 @@ There are two paths:
 | OpenRouter | `openrouter.ai/api/v1/credits` | `Authorization: Bearer {api_key}` |
 | Kimi (Moonshot) | `api.moonshot.ai/v1/users/me/balance` | `Authorization: Bearer {api_key}` |
 | Synthetic.new | `api.synthetic.new/v2/quotas` | `Authorization: Bearer {api_key}` |
+| Grok (xAI) | `cli-chat-proxy.grok.com/v1/billing?format=credits` | `Bearer {oauth}` + `X-XAI-Token-Auth: xai-grok-cli` + user/version headers |
 
 ### Token Refresh Endpoints
 
@@ -156,3 +157,4 @@ Before publishing:
 7. **Windows**: Untested, may have path issues; `credential_lock()` degrades to no locking without `fcntl`
 8. **macOS Claude credentials**: Keychain-stored tokens are read-only — cclimits won't write a refreshed token back into the Keychain, so expiry there still reports as expired
 9. **Codex has no shared lock**: `credential_lock()` only serializes cclimits against itself, and codex exposes no lock file (just an in-process mutex), so a simultaneous codex refresh is still possible. Claude is covered by `claude_refresh_lock()`
+10. **Grok credentials are read-only**: coding-credit usage comes from the official CLI's internal `/v1/billing?format=credits` endpoint. `~/.grok/auth.json` is read but never refreshed or written by cclimits, so an expired token reports as expired until `grok` is run. The endpoint requires the Grok session token plus `X-XAI-Token-Auth`, `x-userid`, `x-grok-client-version`, and `x-grok-client-mode` headers

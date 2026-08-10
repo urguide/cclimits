@@ -97,7 +97,7 @@ All provider metadata lives in a single `PROVIDERS` list of dicts at module leve
 | `gated` | If `True`, `check_all` gates on credential probe before fetching |
 | `creds` | Credential function name (string) for gated providers; `None` for ungated |
 | `oneline_order` | Sort key for oneline display order (differs from registry/canonical order) |
-| `render_oneline` | Function `(data, window, use_color) -> str | None`; returns `None` if data not renderable |
+| `render_oneline` | Function `(data, window, use_color) -> str \| None`; returns `None` if data not renderable |
 
 **Three oneline renderer patterns:**
 
@@ -116,6 +116,7 @@ All provider metadata lives in a single `PROVIDERS` list of dicts at module leve
 1. Write a `get_X_usage()` function (and `get_X_credentials()` if gated)
 2. Add one entry to `PROVIDERS` (use a factory for percent/balance renderers, or write a custom renderer)
 3. No edits needed to `main()`, `print_oneline()`, or argparse setup
+4. If the provider reads a credential *file*, add a module-level `X_AUTH_PATHS` list and patch it in the `isolated_credentials` fixture — otherwise a logged-in developer's real account leaks into the test run and flips gated providers on
 
 **Two ordering dimensions:**
 - Registry order = canonical order for `main()` (argparse, dispatch, result collection, detailed output, JSON key order)

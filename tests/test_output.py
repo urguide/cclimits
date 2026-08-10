@@ -617,6 +617,59 @@ class TestOnelineMissingCredentials:
         assert "ERR" not in captured.out
 
 
+class TestGrokOutput:
+    """Grok billing usage renders in both detailed and oneline output."""
+
+    def test_grok_weekly_oneline(self, capsys):
+        results = {"grok": {"status": "ok", "credit_usage": {
+            "percentage": 55.0, "period": "7d", "resets_in": "5d 2h",
+        }}}
+        print_oneline(results, "5h")
+        assert "Grok: 55% (7d) ✅" in capsys.readouterr().out
+
+    def test_grok_oneline_with_reset(self, capsys):
+        results = {"grok": {"status": "ok", "credit_usage": {
+            "percentage": 55.0, "period": "7d", "resets_in": "5d 2h",
+        }}}
+        print_oneline(results, "both", show_resets=True)
+        assert "Grok: 55% (7d) ✅ ↻5d2h" in capsys.readouterr().out
+
+    def test_grok_error_uses_shared_failure_branch(self, capsys):
+        print_oneline({"grok": {"error": "No credentials found"}}, "5h")
+        assert "Grok: 🔑" in capsys.readouterr().out
+
+    def test_grok_renders_in_detailed_section(self, capsys):
+        print_section("Grok (xAI)", {
+            "status": "ok",
+            "plan": "GrokPro",
+            "account": "user@example.com",
+            "credit_usage": {"percentage": 55.0, "period": "7d", "resets_in": "5d 2h"},
+            "product_usage": [
+                {"product": "GrokBuild", "percentage": 53.0},
+                {"product": "GrokChat", "percentage": 2.0},
+            ],
+            "prepaid_balance_usd": 5.0,
+            "on_demand_enabled": True,
+            "cli_access": True,
+            "token_expires_in": "5h 20m",
+        })
+        out = capsys.readouterr().out
+        assert "Grok (xAI)" in out
+        assert "📊 Plan: GrokPro" in out
+        assert "👤 Account: user@example.com" in out
+        assert "Used:      55%" in out
+        assert "GrokBuild    53%" in out
+        assert "Prepaid balance: $5.00" in out
+        assert "On-demand: enabled" in out
+        assert "🤖 CLI Access: yes" in out
+        # The token countdown must appear exactly once (shared renderer, not duplicated)
+        assert out.count("Token expires in: 5h 20m") == 1
+
+    def test_grok_cli_access_false(self, capsys):
+        print_section("Grok (xAI)", {"status": "ok", "cli_access": False})
+        assert "🤖 CLI Access: no" in capsys.readouterr().out
+
+
 class TestOnelineResets:
     """--resets appends compact reset countdowns to oneline output."""
 

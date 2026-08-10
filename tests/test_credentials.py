@@ -275,6 +275,90 @@ class TestJwtClaims:
         assert jwt_claims(token) is None
 
 
+class TestGetGrokCredentials:
+    """Tests for get_grok_credentials() — reads Grok CLI's ~/.grok/auth.json."""
+
+    @staticmethod
+    def _write_auth(tmp_path, monkeypatch, payload):
+        auth = tmp_path / "grok-auth.json"
+        auth.write_text(json.dumps(payload))
+        monkeypatch.setattr(cclimits, "GROK_AUTH_PATHS", [auth])
+        return auth
+
+    def test_reads_scoped_entry(self, tmp_path, monkeypatch):
+        """The token lives under an '<issuer>::<client_id>' key, not at the root."""
+        self._write_auth(tmp_path, monkeypatch, {
+            "https://auth.x.ai::client-abc": {
+                "key": "token-abc",
+                "refresh_token": "refresh-abc",
+                "expires_at": "2026-08-10T08:16:35.159114061Z",
+            }
+        })
+
+        creds = cclimits.get_grok_credentials()
+        assert creds["access_token"] == "token-abc"
+        assert creds["source"] == "grok-cli"
+
+    def test_picks_latest_expiry_among_scopes(self, tmp_path, monkeypatch):
+        """With several scopes present, the longest-lived token is the active one."""
+        self._write_auth(tmp_path, monkeypatch, {
+            "https://auth.x.ai::old": {"key": "stale", "expires_at": "2026-01-01T00:00:00Z"},
+            "https://auth.x.ai::new": {"key": "fresh", "expires_at": "2026-12-01T00:00:00Z"},
+        })
+
+        assert cclimits.get_grok_credentials()["access_token"] == "fresh"
+
+    def test_skips_entries_without_key(self, tmp_path, monkeypatch):
+        self._write_auth(tmp_path, monkeypatch, {
+            "https://auth.x.ai::empty": {"refresh_token": "only-refresh"},
+        })
+
+        assert cclimits.get_grok_credentials() is None
+
+    def test_malformed_file_is_not_fatal(self, tmp_path, monkeypatch):
+        auth = tmp_path / "grok-auth.json"
+        auth.write_text("{not json")
+        monkeypatch.setattr(cclimits, "GROK_AUTH_PATHS", [auth])
+
+        assert cclimits.get_grok_credentials() is None
+
+    def test_env_fallback(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cclimits, "GROK_AUTH_PATHS", [tmp_path / "missing.json"])
+        monkeypatch.setenv("GROK_ACCESS_TOKEN", "env-token")
+
+        creds = cclimits.get_grok_credentials()
+        assert creds["access_token"] == "env-token"
+        assert creds["source"] == "GROK_ACCESS_TOKEN"
+
+    def test_auth_file_wins_over_env(self, tmp_path, monkeypatch):
+        self._write_auth(tmp_path, monkeypatch, {
+            "https://auth.x.ai::c": {"key": "file-token", "expires_at": "2026-12-01T00:00:00Z"},
+        })
+        monkeypatch.setenv("GROK_ACCESS_TOKEN", "env-token")
+
+        assert cclimits.get_grok_credentials()["access_token"] == "file-token"
+
+    def test_no_credentials(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cclimits, "GROK_AUTH_PATHS", [tmp_path / "missing.json"])
+
+        assert cclimits.get_grok_credentials() is None
+
+
+class TestGetGrokClientVersion:
+    def test_reads_models_cache(self, tmp_path, monkeypatch):
+        cache = tmp_path / "models_cache.json"
+        cache.write_text(json.dumps({"grok_version": "0.3.1"}))
+        monkeypatch.setattr(cclimits, "GROK_MODELS_CACHE_PATHS", [cache])
+
+        assert cclimits._get_grok_client_version() == "0.3.1"
+
+    def test_env_override(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cclimits, "GROK_MODELS_CACHE_PATHS", [tmp_path / "missing.json"])
+        monkeypatch.setenv("GROK_CLIENT_VERSION", "9.9.9")
+
+        assert cclimits._get_grok_client_version() == "9.9.9"
+
+
 class TestWriteJsonSecure:
     """Tests for write_json_secure() — credential files must stay private."""
 

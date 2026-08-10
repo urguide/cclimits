@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/urguide/cclimits/actions/workflows/ci.yml/badge.svg)](https://github.com/urguide/cclimits/actions/workflows/ci.yml)
 
-Check quota/usage for AI coding CLI tools: Claude Code, OpenAI Codex, Google Gemini CLI, Google Antigravity, Z.AI, OpenRouter, Kimi K2 (Moonshot AI), and Synthetic.new. It also supports checking keys used by **Aider** and **Continue**.
+Check quota/usage for AI coding CLI tools: Claude Code, OpenAI Codex, Google Gemini CLI, Google Antigravity, Z.AI, OpenRouter, Kimi K2 (Moonshot AI), Synthetic.new, and Grok (xAI). It also supports checking keys used by **Aider** and **Continue**.
 
 ## Features
 
@@ -52,6 +52,7 @@ cclimits --openrouter # OpenRouter only
 cclimits --kimi       # Kimi only
 cclimits --antigravity # Google Antigravity only
 cclimits --synthetic  # Synthetic.new only
+cclimits --grok       # Grok (xAI) credits only
 cclimits --json       # JSON output
 cclimits --oneline           # Compact one-liner (5h window)
 cclimits --oneline 7d        # Compact one-liner (7d window)
@@ -71,7 +72,7 @@ cclimits --oneline --cache-ttl 30  # Custom TTL in seconds
 
 ```bash
 # Single window (5h or 7d)
-Claude: 4.0% (5h) ✅ | Codex: 0% (5h) ✅ | Z.AI: 1% (5h) ✅ | Gemini: ( 3-Flash 7% ✅ | Flash 1% ✅ | Pro 10% ✅ ) | OpenRouter: $47.91 ✅ | Kimi: $49.59 ✅ | Antigravity: 35% (8 models) ✅
+Claude: 4.0% (5h) ✅ | Codex: 0% (5h) ✅ | Z.AI: 1% (5h) ✅ | Gemini: ( 3-Flash 7% ✅ | Flash 1% ✅ | Pro 10% ✅ ) | OpenRouter: $47.91 ✅ | Kimi: $49.59 ✅ | Antigravity: 35% (8 models) ✅ | Grok: 55% (7d) ✅
 
 # Both windows (--oneline both) - shows 5h/7d combined (Z.AI: 5h-tokens%/monthly-MCP-tools%)
 Claude: 4.0%/10.0% ✅ | Codex: 0%/2% ✅ | Z.AI: 1%/16% ✅ | OpenRouter: $47.91 ✅
@@ -93,6 +94,9 @@ Z.AI: 1%/16% ✅ ↻3h28m/5d10h
 ```
 
 Status icons: ✅ ok · ⚠️ high usage · ❌ error · 🔑 no credentials found · ⏰ token expired. Cached results (`--cached`) are suffixed with their age, e.g. `(cached 42s)`.
+
+Grok's credit period is supplied by xAI and may be weekly or monthly. Example:
+`Grok: 55% (7d) ✅ ↻6d4h`.
 
 ### Detailed Output (default)
 
@@ -215,6 +219,27 @@ Status icons: ✅ ok · ⚠️ high usage · ❌ error · 🔑 no credentials fo
   Weekly Credits:
     Remaining: $72.00 / $72.00 (100%)
     Next regen: 2h 53m (+$1.44)
+
+==================================================
+  Grok (xAI)
+==================================================
+  👤 Account: you@example.com
+  ✅ Connected
+  📊 Plan: GrokPro
+  ⏱️  Token expires in: 5h 13m
+
+  Credits (7d):
+    Used:      55%
+    Resets in: 6d 4h
+
+  Product Usage:
+    GrokBuild    53%
+    GrokChat     2%
+    GrokImagine  0%
+  💳 Prepaid balance: $0.00
+  🤖 CLI Access: yes
+  📡 Source: grok-cli
+  🔗 https://grok.com
 ```
 
 ## Status Icons
@@ -301,6 +326,7 @@ Credentials are auto-discovered from these locations:
 | **Kimi** | `$MOONSHOT_API_KEY` environment variable |
 | **Antigravity** | `~/.gemini/antigravity-cli/antigravity-oauth-token` (auto-refreshes); fallback `$ANTIGRAVITY_REFRESH_TOKEN` / `$ANTIGRAVITY_ACCESS_TOKEN` |
 | **Synthetic.new** | `$SYNTHETIC_API_KEY` environment variable |
+| **Grok** | `~/.grok/auth.json` (written by `grok login`); fallback `$GROK_ACCESS_TOKEN` session token |
 
 ## Setup (One-Time)
 
@@ -311,6 +337,7 @@ claude           # Login to Claude Code
 codex login      # Login to OpenAI Codex
 gemini           # Login to Gemini CLI
 agy -p hello                 # Login to Google Antigravity (prompts for OAuth)
+grok login       # Login to Grok CLI (xAI)
 export ZAI_KEY=your-key           # Add to ~/.zshrc or ~/.bashrc
 export OPENROUTER_API_KEY=your-key  # Add to ~/.zshrc or ~/.bashrc
 export MOONSHOT_API_KEY=your-key    # Add to ~/.zshrc or ~/.bashrc
@@ -361,6 +388,27 @@ Details:
 ### Antigravity Authentication
 
 The `agy` CLI writes its OAuth tokens to `~/.gemini/antigravity-cli/antigravity-oauth-token`; cclimits reads that file and auto-refreshes the access token via Google's OAuth endpoint. As a fallback (e.g. shared CI machines without the agy install), set `ANTIGRAVITY_REFRESH_TOKEN` (or `ANTIGRAVITY_ACCESS_TOKEN`) in your environment.
+
+### Grok (xAI) Billing
+
+Grok Build exposes its coding-credit usage through the same internal billing
+endpoint used by the official `xai-org/grok-build` client:
+
+```text
+GET https://cli-chat-proxy.grok.com/v1/billing?format=credits
+X-XAI-Token-Auth: xai-grok-cli
+x-userid: <Grok user ID>
+x-grok-client-version: <installed CLI version>
+```
+
+The response includes `creditUsagePercent`, a weekly or monthly current period,
+per-product usage (`GrokBuild`, `GrokChat`, `GrokImagine`), prepaid balance and
+on-demand billing fields. The endpoint was confirmed against the official
+source in `crates/codegen/xai-grok-shell/src/extensions/billing.rs` and with a
+live Grok CLI account.
+
+cclimits reads `~/.grok/auth.json` read-only and never refreshes or writes it.
+If the access token has expired, run `grok` to let the official CLI refresh it.
 
 ### Gemini Token Refresh
 

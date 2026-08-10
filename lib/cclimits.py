@@ -2,7 +2,7 @@
 """
 AI CLI Usage Checker
 Fetches remaining quota/usage for Claude Code, Codex, Gemini, Z.AI, OpenRouter,
-Kimi, Google Antigravity, and Synthetic.new
+Kimi, Google Antigravity, Synthetic.new, and Grok (xAI)
 """
 
 from __future__ import annotations
@@ -1952,6 +1952,211 @@ def get_synthetic_usage() -> dict:
     return result
 
 
+### Grok (xAI) Functions
+
+GROK_AUTH_PATHS = [
+    Path.home() / ".grok" / "auth.json",
+]
+
+GROK_USER_URL = "https://cli-chat-proxy.grok.com/v1/user?include=subscription"
+GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
+GROK_MODELS_CACHE_PATHS = [
+    Path.home() / ".grok" / "models_cache.json",
+]
+
+
+def _read_grok_auth_file() -> dict | None:
+    """Return the active entry from Grok CLI's ``~/.grok/auth.json``.
+
+    The file is keyed by ``"<oidc_issuer>::<client_id>"`` and each value holds
+    ``key`` (the access-token JWT), ``refresh_token`` and ``expires_at``.  When
+    several scopes are present we pick the one whose token expires last, which
+    is the entry the CLI itself would be using.
+    """
+    for auth_path in GROK_AUTH_PATHS:
+        if not auth_path.exists():
+            continue
+        try:
+            data = json.loads(auth_path.read_text())
+        except (json.JSONDecodeError, OSError, PermissionError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        entries = [v for v in data.values() if isinstance(v, dict) and v.get("key")]
+        if not entries:
+            continue
+        return max(entries, key=lambda e: str(e.get("expires_at") or ""))
+    return None
+
+
+def get_grok_credentials() -> dict | None:
+    """Get Grok CLI OAuth credentials from ~/.grok/auth.json or the environment."""
+    entry = _read_grok_auth_file()
+    if entry:
+        return {"access_token": entry["key"], "entry": entry, "source": "grok-cli"}
+
+    for var in ["GROK_ACCESS_TOKEN"]:
+        if token := os.environ.get(var):
+            return {"access_token": token, "entry": {}, "source": var}
+    return None
+
+
+def _get_grok_client_version() -> str:
+    """Read the installed Grok CLI version without spawning the binary."""
+    if version := os.environ.get("GROK_CLIENT_VERSION"):
+        return version
+    for cache_path in GROK_MODELS_CACHE_PATHS:
+        try:
+            data = json.loads(cache_path.read_text())
+            if isinstance(data, dict) and data.get("grok_version"):
+                return str(data["grok_version"])
+        except (json.JSONDecodeError, OSError, PermissionError, ValueError):
+            continue
+    # Current stable at implementation time. Users with a nonstandard install
+    # can override this without exposing any credential material.
+    return "0.2.117"
+
+
+def get_grok_usage() -> dict:
+    """Fetch Grok Build credit usage and subscription metadata."""
+    creds = get_grok_credentials()
+    if not creds:
+        return {
+            "error": NO_CREDS_ERROR,
+            "hint": "Run `grok login`, or set GROK_ACCESS_TOKEN",
+            "dashboard": "https://grok.com",
+        }
+
+    token = creds["access_token"]
+    claims = jwt_claims(token) or {}
+    expires_at = claims.get("exp")
+
+    if _is_expired(expires_at):
+        return {
+            "token_status": "expired",
+            "error": "Token expired",
+            "hint": "Run `grok` to refresh, or `grok login` to re-authenticate",
+            "dashboard": "https://grok.com",
+        }
+
+    entry = creds.get("entry") or {}
+    user_id = entry.get("user_id") or claims.get("sub") or claims.get("principal_id")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-XAI-Token-Auth": "xai-grok-cli",
+        "x-grok-client-version": _get_grok_client_version(),
+        "x-grok-client-mode": "interactive",
+    }
+    if user_id:
+        headers["x-userid"] = str(user_id)
+
+    status, data = http_get(GROK_BILLING_URL, headers)
+
+    if status == 401:
+        return {
+            "error": "Invalid API key",
+            "hint": "Run `grok login` to re-authenticate",
+            "dashboard": "https://grok.com",
+        }
+    if status == 403:
+        return {"error": "Forbidden", "hint": "Account may be blocked or lack Grok CLI access"}
+    if status != 200 or not isinstance(data, dict):
+        return {
+            "error": f"API error ({status})",
+            "details": data if isinstance(data, str) else json.dumps(data)[:200],
+        }
+
+    config = data.get("config") or {}
+    if not isinstance(config, dict):
+        return {"error": "Invalid API response", "details": "billing config is not an object"}
+
+    result: dict = {"status": "ok", "source": creds["source"]}
+    pct = config.get("creditUsagePercent")
+    if pct is None:
+        monthly_limit = (config.get("monthlyLimit") or {}).get("val")
+        used = (config.get("used") or {}).get("val")
+        if monthly_limit:
+            pct = round(float(used or 0) / float(monthly_limit) * 100, 2)
+    if pct is not None:
+        result["credit_usage"] = {"percentage": float(pct)}
+
+    period = config.get("currentPeriod") or {}
+    if isinstance(period, dict):
+        period_type = str(period.get("type") or "")
+        if "WEEKLY" in period_type:
+            result.setdefault("credit_usage", {})["period"] = "7d"
+        elif "MONTHLY" in period_type:
+            result.setdefault("credit_usage", {})["period"] = "monthly"
+        if period.get("start"):
+            result.setdefault("credit_usage", {})["period_start"] = period["start"]
+        if period.get("end"):
+            result.setdefault("credit_usage", {})["period_end"] = period["end"]
+            result.setdefault("credit_usage", {})["resets_in"] = format_reset_time(period["end"])
+
+    products = []
+    for product in config.get("productUsage") or []:
+        if isinstance(product, dict) and product.get("product"):
+            products.append({
+                "product": str(product["product"]),
+                "percentage": float(product.get("usagePercent") or 0),
+            })
+    if products:
+        result["product_usage"] = products
+
+    for source_key, result_key in (
+        ("prepaidBalance", "prepaid_balance_usd"),
+        ("onDemandCap", "on_demand_cap_usd"),
+        ("onDemandUsed", "on_demand_used_usd"),
+    ):
+        value = config.get(source_key)
+        if isinstance(value, dict) and value.get("val") is not None:
+            result[result_key] = float(value.get("val") or 0) / 100
+    if config.get("isUnifiedBillingUser") is not None:
+        result["unified_billing"] = bool(config["isUnifiedBillingUser"])
+    if data.get("onDemandEnabled") is not None:
+        result["on_demand_enabled"] = bool(data["onDemandEnabled"])
+    if config.get("topUpMethod"):
+        result["top_up_method"] = config["topUpMethod"]
+
+    if tier := data.get("subscriptionTier"):
+        result["plan"] = tier
+    if email := entry.get("email"):
+        result["account"] = email
+
+    # The official extension enriches raw billing with /settings fields.
+    if "plan" not in result or "on_demand_enabled" not in result:
+        settings_status, settings = http_get(GROK_SETTINGS_URL, headers)
+        if settings_status == 200 and isinstance(settings, dict):
+            tier = settings.get("subscription_tier_display") or settings.get("subscription_tier")
+            if tier:
+                result.setdefault("plan", tier)
+            if settings.get("on_demand_enabled") is not None:
+                result.setdefault("on_demand_enabled", bool(settings["on_demand_enabled"]))
+
+    # Environment-provided tokens do not carry the credential-file email.
+    if "account" not in result:
+        user_status, user_data = http_get(GROK_USER_URL, headers)
+        if user_status == 200 and isinstance(user_data, dict):
+            if email := user_data.get("email"):
+                result.setdefault("account", email)
+            if (has_access := user_data.get("hasGrokCodeAccess")) is not None:
+                result["cli_access"] = bool(has_access)
+            if team := user_data.get("teamName"):
+                result["team"] = team
+            if blocked := user_data.get("userBlockedReason"):
+                result["blocked_reason"] = blocked
+
+    if expires_at:
+        remaining = int(expires_at - time.time())
+        if remaining > 0:
+            hours, minutes = divmod(remaining // 60, 60)
+            result["token_expires_in"] = f"{hours}h {minutes}m" if hours else f"{minutes}m"
+
+    result["dashboard"] = "https://grok.com"
+    return result
+
+
 def print_section(name: str, data: dict):
     """Pretty print a section"""
     print(f"\n{'='*50}")
@@ -2187,7 +2392,31 @@ def print_section(name: str, data: dict):
         print(f"    Total:     {symbol}{balance:.4f}")
         print(f"    Cash:      {symbol}{cash:.4f}")
         print(f"    Voucher:   {symbol}{voucher:.4f}")
-        
+
+    # Grok-specific billing data
+    if "credit_usage" in data:
+        usage = data["credit_usage"]
+        print(f"\n  Credits ({usage.get('period', 'current period')}):")
+        if "percentage" in usage:
+            print(f"    Used:      {usage['percentage']:g}%")
+        if "resets_in" in usage:
+            print(f"    Resets in: {usage['resets_in']}")
+    if "product_usage" in data:
+        print("\n  Product Usage:")
+        for product in data["product_usage"]:
+            print(f"    {product['product']:<12} {product['percentage']:g}%")
+    if "prepaid_balance_usd" in data:
+        print(f"  💳 Prepaid balance: ${data['prepaid_balance_usd']:.2f}")
+    if "on_demand_enabled" in data:
+        print(f"  💳 On-demand: {'enabled' if data['on_demand_enabled'] else 'disabled'}")
+    if "cli_access" in data:
+        print(f"  🤖 CLI Access: {'yes' if data['cli_access'] else 'no'}")
+    if "team" in data:
+        print(f"  👥 Team: {data['team']}")
+    if "blocked_reason" in data:
+        print(f"  🚫 Blocked: {data['blocked_reason']}")
+    # note: "token_expires_in" is already rendered by the shared token line above
+
     # General info
     if "source" in data:
         print(f"  📡 Source: {data['source']}")
@@ -2392,6 +2621,18 @@ def _render_antigravity(data, window, use_color, show_resets=False):
     return out
 
 
+def _render_grok(data, window, use_color, show_resets=False):
+    if not (data.get("status") == "ok" and "percentage" in data.get("credit_usage", {})):
+        return None
+    usage = data["credit_usage"]
+    pct = float(usage["percentage"])
+    period = usage.get("period", "period")
+    out = _fmt_single("Grok", f"{pct:g}% ({period})", pct, "", use_color)
+    if show_resets and (suf := _reset_suffix(usage.get("resets_in"))):
+        out += f" {suf}"
+    return out
+
+
 # Provider registry — single source of truth.  Adding a provider: one entry
 # here + a fetch function (+ a custom renderer if the shared ones don't fit).
 
@@ -2428,6 +2669,10 @@ PROVIDERS = [
      "arg_help": "Only check Synthetic.new", "fetch": "get_synthetic_usage",
      "gated": True, "creds": "get_synthetic_credentials", "oneline_order": 3,
      "render_oneline": _render_synthetic},
+    {"key": "grok", "title": "Grok (xAI)", "oneline_label": "Grok",
+     "arg_help": "Only check Grok (xAI)", "fetch": "get_grok_usage",
+     "gated": True, "creds": "get_grok_credentials", "oneline_order": 8,
+     "render_oneline": _render_grok},
 ]
 
 
@@ -2489,12 +2734,14 @@ Credential Locations (auto-discovered):
   Kimi       $MOONSHOT_API_KEY environment variable
   Antigravity system keyring, or $ANTIGRAVITY_REFRESH_TOKEN
   Synthetic  $SYNTHETIC_API_KEY environment variable
+  Grok       ~/.grok/auth.json, or $GROK_ACCESS_TOKEN
 
 Setup (one-time):
   claude           # Login to Claude Code
   codex login      # Login to OpenAI Codex
   gemini           # Login to Gemini CLI
   antigravity auth login  # Login to Google Antigravity
+  grok login       # Login to Grok CLI
   export ZAI_KEY=your-key         # Add to ~/.zshrc or ~/.bashrc
   export MOONSHOT_API_KEY=key     # Add to ~/.zshrc or ~/.bashrc
   export SYNTHETIC_API_KEY=key    # Add to ~/.zshrc or ~/.bashrc
@@ -2505,6 +2752,7 @@ Examples:
   cclimits --kimi       # Kimi only
   cclimits --antigravity # Antigravity only
   cclimits --synthetic  # Synthetic.new only
+  cclimits --grok       # Grok (xAI) credits only
   cclimits --json       # JSON output
   cclimits --oneline      # Compact one-liner (5h window)
   cclimits --oneline 7d   # Compact one-liner (7d window)
@@ -2517,7 +2765,7 @@ Example Output:
 """
 
     parser = argparse.ArgumentParser(
-        description="Check AI CLI usage/quota for Claude, Codex, Gemini, Z.AI, OpenRouter, Kimi, Antigravity, Synthetic.new",
+        description="Check AI CLI usage/quota for Claude, Codex, Gemini, Z.AI, OpenRouter, Kimi, Antigravity, Synthetic.new, Grok",
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
