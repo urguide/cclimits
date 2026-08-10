@@ -290,11 +290,19 @@ Override via environment variables:
 | `CCLIMITS_TMUX_TTL` | `180` | Seconds before the cache is refreshed |
 | `CCLIMITS_TMUX_ARGS` | `--claude --codex --grok --oneline both --compact --resets` | Arguments passed to `cclimits` |
 | `CCLIMITS_BIN` | auto-detected | Path to the `cclimits` executable |
+| `GROK_BIN` | `grok` | Official Grok executable used for safe session refresh |
 
 ```tmux
 # Refresh every 60s, show all providers with reset countdowns
 set -g status-right '#(CCLIMITS_TMUX_TTL=60 CCLIMITS_TMUX_ARGS="--oneline both --resets" ~/.local/bin/cclimits-tmux)'
 ```
+
+The wrapper keeps a stable last-known-good display cache, so the tmux segment
+does not disappear while a new argument-specific cache is warming up. If Grok's
+session is expired, the background refresh runs `grok models` once and then
+retries cclimits. This delegates refresh-token rotation, locking and credential
+write-back to the official CLI without sending a model prompt or consuming
+Grok Build credits.
 
 `cclimits` is resolved in this order: `$CCLIMITS_BIN`, then a sibling
 `../lib/cclimits.py` (when run from a git checkout), then `PATH`.

@@ -19,6 +19,7 @@
 #   CCLIMITS_TMUX_TTL    refresh interval in seconds (default: 180)
 #   CCLIMITS_TMUX_ARGS   cclimits arguments (default: --claude --codex --grok --oneline both --compact --resets)
 #   CCLIMITS_BIN         path to the cclimits executable
+#   GROK_BIN             path to the official Grok executable (default: grok)
 
 set -u
 
@@ -29,6 +30,12 @@ ARGS=${CCLIMITS_TMUX_ARGS:---claude --codex --grok --oneline both --compact --re
 ARGS_KEY=$(printf '%s' "$ARGS" | cksum | cut -d' ' -f1)
 CACHE="${TMPDIR:-/tmp}/cclimits-tmux.$(id -u).$ARGS_KEY.cache"
 LEASE="$CACHE.lease"
+# Unlike the argument-keyed data cache, this display cache survives view/flag
+# changes. tmux therefore always has a last-known-good string while the first
+# lookup for a new argument set runs in the background.
+DISPLAY_CACHE="${TMPDIR:-/tmp}/cclimits-tmux.$(id -u).display.cache"
+DISPLAY_TMP="$DISPLAY_CACHE.$BASHPID.tmp"
+GROK_CMD=${GROK_BIN:-grok}
 
 # Resolve cclimits: explicit override, then the repo checkout this script
 # lives in, then PATH.
@@ -43,8 +50,13 @@ else
   fi
 fi
 
-# Serve the cached value immediately.
-[ -f "$CACHE" ] && cat -- "$CACHE"
+# Serve a value immediately. The stable display cache prevents a blank status
+# line when arguments change or an argument-keyed cache has not been built yet.
+if [ -s "$CACHE" ]; then
+  cat -- "$CACHE"
+elif [ -s "$DISPLAY_CACHE" ]; then
+  cat -- "$DISPLAY_CACHE"
+fi
 
 # Refresh only if no lookup has been attempted within the last TTL seconds.
 if [ ! -f "$LEASE" ] || [ $(( $(date +%s) - $(stat -c %Y -- "$LEASE") )) -ge "$TTL" ]; then
@@ -60,17 +72,31 @@ if [ ! -f "$LEASE" ] || [ $(( $(date +%s) - $(stat -c %Y -- "$LEASE") )) -ge "$T
       exit 0
     fi
 
+    # An expired Grok session can be refreshed safely by the official CLI's
+    # model-list command. It exercises AuthManager (including xAI's rotating-RT
+    # lock/write protocol) but does not send a model prompt or consume credits.
+    if grep -qE 'Grok:(expired|⏰)' -- "$CACHE.tmp" && command -v "$GROK_CMD" >/dev/null 2>&1; then
+      if "$GROK_CMD" models >/dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        "${CMD[@]}" $ARGS >"$CACHE.tmp" 2>/dev/null || true
+      fi
+    fi
+
     # cclimits exits 0 even when a provider lookup fails, marking the entry
     # with a failure icon instead.  Treat such output as a failure so a
     # transient outage never overwrites a good reading.
-    if [ ! -s "$CACHE.tmp" ] || grep -qE '❌|🔑|⏰|ERR' -- "$CACHE.tmp"; then
+    if [ ! -s "$CACHE.tmp" ] || grep -qE '❌|🔑|⏰|ERR|:(expired|no key)(_|$)' -- "$CACHE.tmp"; then
       # No prior reading to protect: show the failure rather than nothing.
-      [ -s "$CACHE" ] || mv -- "$CACHE.tmp" "$CACHE"
+      if [ ! -s "$CACHE" ] && [ -s "$CACHE.tmp" ]; then
+        mv -- "$CACHE.tmp" "$CACHE"
+        cp -- "$CACHE" "$DISPLAY_TMP" && mv -- "$DISPLAY_TMP" "$DISPLAY_CACHE"
+      fi
       rm -f -- "$CACHE.tmp"
       exit 0
     fi
 
     mv -- "$CACHE.tmp" "$CACHE"
+    cp -- "$CACHE" "$DISPLAY_TMP" && mv -- "$DISPLAY_TMP" "$DISPLAY_CACHE"
   ) 9>"$CACHE.lock" >/dev/null 2>&1 &
 fi
 
