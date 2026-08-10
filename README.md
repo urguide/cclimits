@@ -290,6 +290,7 @@ Override via environment variables:
 |----------|---------|-------------|
 | `CCLIMITS_TMUX_TTL` | `180` | Seconds before the cache is refreshed |
 | `CCLIMITS_TMUX_WATCH_INTERVAL` | `2` | Seconds between complete status-line emissions |
+| `CCLIMITS_TMUX_PLACEHOLDER` | `cclimits...` | Line shown until the first lookup lands (set empty to disable) |
 | `CCLIMITS_TMUX_ARGS` | `--claude --codex --grok --oneline both --compact --resets` | Arguments passed to `cclimits` |
 | `CCLIMITS_BIN` | auto-detected | Path to the `cclimits` executable |
 | `GROK_BIN` | `grok` | Official Grok executable used for safe session refresh |
@@ -306,8 +307,24 @@ retries cclimits. This delegates refresh-token rotation, locking and credential
 write-back to the official CLI without sending a model prompt or consuming
 Grok Build credits.
 
+A refresh that reports a *transient* failure — an API error (`ERR`) or an
+expired token (`expired`) — is discarded so it cannot overwrite a good reading.
+A missing credential (`no key`) is not transient: retrying cannot change it, so
+it is accepted normally. Otherwise a single unconfigured provider would reject
+every refresh forever and freeze the percentages of the providers that do work.
+
 `cclimits` is resolved in this order: `$CCLIMITS_BIN`, then a sibling
 `../lib/cclimits.py` (when run from a git checkout), then `PATH`.
+
+Note that the tmux **server** environment is not your interactive shell's. If
+`cclimits` lives somewhere your login shell adds to `PATH` (e.g.
+`~/.local/bin`), the server may not see it and the status line will stay empty
+or show tmux's `<'...' not ready>` marker. Set `CCLIMITS_BIN` to an absolute
+path to make resolution independent of the server's `PATH`:
+
+```tmux
+set-environment -g CCLIMITS_BIN "$HOME/.local/bin/cclimits"
+```
 
 ### Notes
 
@@ -317,8 +334,9 @@ Grok Build credits.
 - The cache lives in `${TMPDIR:-/tmp}/cclimits-tmux.<uid>.<args-hash>.cache` and
   is keyed on the argument list, so different views never serve each other's
   output. Concurrent panes are de-duplicated with `flock`.
-- On a cold cache the first render is empty; the value appears on the next
-  status refresh.
+- On a cold cache `--watch` emits `CCLIMITS_TMUX_PLACEHOLDER` until the first
+  lookup lands. Emitting nothing would make tmux render its own
+  `<'...' not ready>` marker instead.
 - The wrapper calls `cclimits` without `--cached`, so no `(cached 42s)` suffix
   appears in the status line.
 

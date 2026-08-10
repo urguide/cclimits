@@ -18,6 +18,7 @@
 # Environment overrides:
 #   CCLIMITS_TMUX_TTL    refresh interval in seconds (default: 180)
 #   CCLIMITS_TMUX_WATCH_INTERVAL  status emission interval (default: 2)
+#   CCLIMITS_TMUX_PLACEHOLDER  cold-cache placeholder line (default: cclimits...)
 #   CCLIMITS_TMUX_ARGS   cclimits arguments (default: --claude --codex --grok --oneline both --compact --resets)
 #   CCLIMITS_BIN         path to the cclimits executable
 #   GROK_BIN             path to the official Grok executable (default: grok)
@@ -29,10 +30,23 @@ set -u
 # short-lived command is restarted on status redraws and some tmux versions
 # temporarily render an empty result between job start and exit, causing a
 # visible on/off flicker even when the command itself takes only milliseconds.
+#
+# On a cold cache there is nothing to serve yet.  Emitting nothing at all is
+# worse than a placeholder: tmux renders its own `<'...' not ready>` marker for
+# a job that has produced no line within a second.  So always emit a complete
+# line, falling back to a short placeholder until the first lookup lands.
 if [ "${1:-}" = "--watch" ]; then
   WATCH_INTERVAL=${CCLIMITS_TMUX_WATCH_INTERVAL:-2}
+  # Not ':-' — an explicitly empty placeholder is a valid choice (accepting
+  # tmux's own marker) and must not silently revert to the default.
+  PLACEHOLDER=${CCLIMITS_TMUX_PLACEHOLDER-cclimits...}
   while :; do
-    "$0"
+    watch_out=$("$0")
+    if [ -n "$watch_out" ]; then
+      printf '%s\n' "$watch_out"
+    else
+      printf '%s\n' "$PLACEHOLDER"
+    fi
     sleep "$WATCH_INTERVAL"
   done
 fi
@@ -97,9 +111,17 @@ if [ ! -f "$LEASE" ] || [ $(( $(date +%s) - $(stat -c %Y -- "$LEASE") )) -ge "$T
     fi
 
     # cclimits exits 0 even when a provider lookup fails, marking the entry
-    # with a failure icon instead.  Treat such output as a failure so a
-    # transient outage never overwrites a good reading.
-    if [ ! -s "$CACHE.tmp" ] || grep -qE '❌|🔑|⏰|ERR|:(expired|no key)(_|$)' -- "$CACHE.tmp"; then
+    # with a failure icon instead.  Treat *transient* failures as a failure so
+    # an outage never overwrites a good reading.
+    #
+    # Only transient states qualify: an API error (❌/ERR) or an expired token
+    # (⏰/expired) can succeed on the next attempt, so the last good reading is
+    # worth protecting.  A missing credential (🔑/`no key`) is a stable
+    # configuration state — retrying cannot change it, and treating it as a
+    # failure would reject every refresh forever, freezing the percentages of
+    # the providers that *are* working (e.g. `Grok:no key` in an otherwise
+    # healthy `Claude:…_Codex:…_Grok:no key` line).
+    if [ ! -s "$CACHE.tmp" ] || grep -qE '❌|⏰|ERR|:expired(_|$)' -- "$CACHE.tmp"; then
       # No prior reading to protect: show the failure rather than nothing.
       if [ ! -s "$CACHE" ] && [ -s "$CACHE.tmp" ]; then
         mv -- "$CACHE.tmp" "$CACHE"

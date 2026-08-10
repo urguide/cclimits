@@ -14,7 +14,7 @@
 - **Display modes**: JSON, detailed, compact one-liner, noemoji color mode, and `--compact` icon-free statusline mode; compact percentages use ceiling (never under-report), reset countdowns collapse to one ceiled unit (`7d` / `16h` / `35m`; dual windows `4h/2d`), cache/stale age tags are hidden, providers use a tight underscore separator (`Claude:99%_Grok:55%`), and failures render as plain `no key` / `expired` / `ERR`
 - **Time windows**: 5h and 7d for Claude/Codex (Codex windows classified by `limit_window_seconds`, not slot position — weekly-only accounts return one window in the primary slot; renderer degrades gracefully to whichever window exists), 5h for Z.AI (shared across GLM models; `both` mode shows tokens%/monthly-MCP%, `--resets` there shows both countdowns), 5h rolling + weekly credits for Synthetic.new
 - **Reset countdowns** (`--resets`, alias `--timeremaining`): appends `↻` countdowns per provider in oneline; Grok uses its server-supplied weekly/monthly credit-period end, Antigravity shows its earliest model reset, and prepaid-balance providers have nothing to reset
-- **tmux wrapper resilience**: `--watch` is a long-running `#()` producer that emits a complete cached line every 2s, avoiding tmux 3.7b's blank interval when short-lived jobs restart; argument-keyed caches also feed a stable last-known-good display cache. Compact failures cannot overwrite good output. Expired Grok triggers one background `grok models`, delegating rotation/write-back to the official CLI without inference
+- **tmux wrapper resilience**: `--watch` is a long-running `#()` producer that emits a complete cached line every 2s, avoiding tmux 3.7b's blank interval when short-lived jobs restart; on a cold cache it emits `CCLIMITS_TMUX_PLACEHOLDER` (default `cclimits...`) so tmux never falls back to its own `<'...' not ready>` marker. Argument-keyed caches also feed a stable last-known-good display cache. Only *transient* failures (`ERR`/`expired`) are barred from overwriting good output — `no key` is a stable config state and must not block refreshes, or one unconfigured provider would freeze the whole line. Expired Grok triggers one background `grok models`, delegating rotation/write-back to the official CLI without inference
 - **Caching** (`--cached`, `~/.cache/cclimits/usage.json`): atomic writes (temp + rename), merge on write (no-creds/partial runs preserve prior good entries), provider filters honored on cache hits (refetch if a requested provider is missing), output labeled with cache age
 - **BYOK Support**: Explicit documentation for monitoring Aider/Continue via their underlying provider keys.
 
@@ -30,7 +30,7 @@
 - ✅ Providers fetched concurrently; cache hits skip all network/credential calls; transient failures fall back to <24h-old cached data with stale marker (v1.3.0)
 - ✅ Data-driven `PROVIDERS` registry — adding a provider is one registry entry + one fetch function
 - ✅ Claude/Codex OAuth tokens self-heal: expiry- and 401-driven refresh, atomic 0600 write-back to the vendor's own credential file, `flock`-serialized plus interop with Claude Code's own `.oauth_refresh.lock`, opt-out via `CCLIMITS_NO_TOKEN_REFRESH=1`
-- ✅ CI (GitHub Actions matrix) + automated npm publish on `v*` tags via Trusted Publishing (OIDC); 291 tests
+- ✅ CI (GitHub Actions matrix) + automated npm publish on `v*` tags via Trusted Publishing (OIDC); 294 tests
 
 ## Known Issues
 

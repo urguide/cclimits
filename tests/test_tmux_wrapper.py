@@ -103,11 +103,37 @@ fi
     assert _run_wrapper(tmp_path, cclimits, args="--grok").strip() == "Grok:55%(7d)"
 
 
-def test_watch_mode_keeps_emitting_complete_lines(tmp_path):
-    """Long-running tmux mode must never alternate a valid line with blank output."""
-    cclimits = _write_executable(
-        tmp_path / "fake-cclimits", "printf 'Claude:10%%(2h)_Grok:20%%(3d)\\n'\n",
+def test_missing_credentials_do_not_block_refresh(tmp_path):
+    """`no key` is a stable config state, not a transient failure to protect against.
+
+    Treating it as a failure would reject every refresh forever, freezing the
+    percentages of the providers that *are* working.
+    """
+    state = tmp_path / "second"
+    cclimits = _write_executable(tmp_path / "fake-cclimits", f"""
+if [ -f {state!s} ]; then
+  printf 'Claude:22%%(2h)_Grok:no key\\n'
+else
+  printf 'Claude:11%%(2h)_Grok:no key\\n'
+fi
+""")
+
+    _run_wrapper(tmp_path, cclimits, args="--all")
+    _wait_for_output(
+        tmp_path, cclimits, args="--all", expected="Claude:11%(2h)_Grok:no key",
     )
+    state.touch()
+
+    # Force another lease cycle without deleting the existing cache.
+    for lease in tmp_path.glob("*.lease"):
+        lease.unlink()
+    _run_wrapper(tmp_path, cclimits, args="--all")
+    _wait_for_output(
+        tmp_path, cclimits, args="--all", expected="Claude:22%(2h)_Grok:no key",
+    )
+
+
+def _read_watch_lines(tmp_path: Path, cclimits: Path, count: int, **extra: str) -> list[str]:
     env = os.environ.copy()
     env.update({
         "TMPDIR": str(tmp_path),
@@ -116,6 +142,7 @@ def test_watch_mode_keeps_emitting_complete_lines(tmp_path):
         "CCLIMITS_TMUX_TTL": "3600",
         "CCLIMITS_TMUX_WATCH_INTERVAL": "0.05",
     })
+    env.update(extra)
     proc = subprocess.Popen(
         ["bash", str(WRAPPER), "--watch"],
         env=env,
@@ -126,11 +153,46 @@ def test_watch_mode_keeps_emitting_complete_lines(tmp_path):
     try:
         deadline = time.monotonic() + 5
         lines = []
-        while len(lines) < 4 and time.monotonic() < deadline:
-            line = proc.stdout.readline().strip()
-            if line:
-                lines.append(line)
-        assert lines == ["Claude:10%(2h)_Grok:20%(3d)"] * 4
+        while len(lines) < count and time.monotonic() < deadline:
+            lines.append(proc.stdout.readline().rstrip("\n"))
+        return lines
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+def test_watch_mode_keeps_emitting_complete_lines(tmp_path):
+    """Long-running tmux mode must never alternate a valid line with blank output."""
+    cclimits = _write_executable(
+        tmp_path / "fake-cclimits", "printf 'Claude:10%%(2h)_Grok:20%%(3d)\\n'\n",
+    )
+    expected = "Claude:10%(2h)_Grok:20%(3d)"
+    lines = _read_watch_lines(
+        tmp_path, cclimits, 6, CCLIMITS_TMUX_PLACEHOLDER="WARMING",
+    )
+
+    # Every emission is a complete line, and the cold-cache placeholder only
+    # ever precedes real data — never interleaves with it.
+    assert "" not in lines
+    assert set(lines) <= {"WARMING", expected}
+    assert lines[-1] == expected
+    assert lines == sorted(lines, key=lambda line: line != "WARMING")
+
+
+def test_watch_mode_emits_placeholder_on_cold_cache(tmp_path):
+    """A blank first line makes tmux render its own `<'...' not ready>` marker."""
+    cclimits = _write_executable(
+        tmp_path / "fake-cclimits", "sleep 3\nprintf 'Claude:10%%(2h)\\n'\n",
+    )
+    assert _read_watch_lines(tmp_path, cclimits, 2) == ["cclimits...", "cclimits..."]
+
+
+def test_watch_mode_placeholder_can_be_disabled(tmp_path):
+    """An explicitly empty placeholder must not fall back to the default."""
+    cclimits = _write_executable(
+        tmp_path / "fake-cclimits", "sleep 3\nprintf 'Claude:10%%(2h)\\n'\n",
+    )
+    lines = _read_watch_lines(
+        tmp_path, cclimits, 2, CCLIMITS_TMUX_PLACEHOLDER="",
+    )
+    assert lines == ["", ""]

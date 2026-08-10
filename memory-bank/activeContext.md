@@ -7,6 +7,8 @@
 
 ## Recent Changes (Last 7 Days)
 
+- **2026-08-10**: **tmux wrapper hardened after a live `<'...' not ready>` report.** The empty output was environmental (tmux server PATH lacked `~/.local/bin`, and the installed wrapper was a copy so the sibling `../lib` probe missed too) — resolved out-of-band, resolution chain untouched. Two real code bugs were found underneath: `no key` was classified as a transient failure, so an unconfigured Grok would have rejected every refresh and frozen Claude/Codex percentages forever; and `--watch` emitted nothing on a cold cache, which is exactly what makes tmux print its own marker. Failure regex narrowed to `ERR`/`expired`; watch mode now emits `CCLIMITS_TMUX_PLACEHOLDER`. 291 → 294 tests
+
 - **2026-08-10**: **Grok (xAI) coding-credit usage added.** Official source revealed the internal billing endpoint; live probing confirmed total/per-product percentages and weekly reset. cclimits keeps `~/.grok/auth.json` read-only; the tmux wrapper delegates expired-session refresh to official `grok models`. Compact output uses ceiling values and collapsed reset units. tmux 3.7b flicker was traced to repeated restart of a short-lived `#()` job; `cclimits-tmux --watch` now stays alive and emits a complete line every 2s. 255 → 291 tests
 - **2026-08-06**: Claude & Codex OAuth token auto-refresh with write-back to the vendor credential files, interop-locked against Claude Code's own `.oauth_refresh.lock`
 
