@@ -718,6 +718,28 @@ class TestGetGrokUsage:
 
     @patch('cclimits.get_grok_credentials')
     @patch('cclimits.http_get')
+    def test_new_weekly_period_without_percent_reports_zero(self, mock_get, mock_creds):
+        """Grok omits creditUsagePercent immediately after the weekly reset."""
+        mock_creds.return_value = self._creds()
+        mock_get.return_value = (200, {"config": {
+            "currentPeriod": {
+                "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                "start": "2099-08-16T07:30:57Z",
+                "end": "2099-08-23T07:30:57Z",
+            },
+            "prepaidBalance": {"val": 0},
+            "onDemandCap": {"val": 0},
+            "onDemandUsed": {"val": 0},
+        }, "subscriptionTier": "SuperGrok"})
+
+        result = get_grok_usage()
+
+        assert result["credit_usage"]["percentage"] == 0.0
+        assert result["credit_usage"]["period"] == "7d"
+        assert result["credit_usage"]["resets_in"] != "N/A"
+
+    @patch('cclimits.get_grok_credentials')
+    @patch('cclimits.http_get')
     def test_missing_usage_percent_still_reports_account(self, mock_get, mock_creds):
         mock_creds.return_value = self._creds()
         mock_get.return_value = (200, {"config": {}, "subscriptionTier": "SuperGrok"})

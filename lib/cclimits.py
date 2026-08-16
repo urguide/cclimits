@@ -2095,6 +2095,12 @@ def get_grok_usage() -> dict:
             result.setdefault("credit_usage", {})["period_end"] = period["end"]
             result.setdefault("credit_usage", {})["resets_in"] = format_reset_time(period["end"])
 
+    # At the start of a fresh billing period Grok omits creditUsagePercent
+    # instead of returning 0. Keep the provider visible when the period itself
+    # is valid; a completely empty or unrecognized config remains unset.
+    if pct is None and result.get("credit_usage", {}).get("period"):
+        result["credit_usage"]["percentage"] = 0.0
+
     products = []
     for product in config.get("productUsage") or []:
         if isinstance(product, dict) and product.get("product"):

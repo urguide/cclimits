@@ -1,5 +1,13 @@
 # Recent Deltas (Last 3-5 Changes)
 
+## 2026-08-16: Grok Remains Visible After Weekly Reset
+
+- **Symptom**: Grok disappeared from the tmux status line immediately after its 7-day credit period rolled over.
+- **Root cause**: the live billing response supplied the new weekly `currentPeriod` start/end but omitted `creditUsagePercent` at zero usage. `get_grok_usage()` therefore produced period metadata without a percentage, and `_render_grok()` correctly rejected the incomplete display value.
+- **Fix**: when a recognized weekly/monthly period is present but the percentage is omitted, normalize the new period to `0.0%`. Completely empty or unrecognized billing configs remain unset rather than being misreported as zero.
+- **Test**: added a regression fixture matching the observed post-reset response shape.
+- **Files**: `lib/cclimits.py`, `tests/test_usage.py`, `memory-bank/deltas.md`, `memory-bank/progress.md`
+
 ## 2026-08-11: `--icons` — Nerd Font Glyphs Instead of Provider Names
 
 - **Motivation**: the default tmux line `Claude:40%/64%(3h/2d)_Codex:34%(7d)_Grok:55%(6d)` is 48 columns, of which 18 are the words `Claude`/`Codex`/`Grok`. `--icons` replaces each with a one-cell glyph → 36 columns, a 12-column saving with no information lost.
