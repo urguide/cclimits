@@ -19,18 +19,33 @@ Check quota/usage for AI coding CLI tools: Claude Code, OpenAI Codex, Google Gem
 ### Download (recommended)
 
 ```bash
-curl -o ~/.local/bin/cclimits https://raw.githubusercontent.com/urguide/cclimits/main/lib/cclimits.py
+curl -fLo ~/.local/bin/cclimits https://raw.githubusercontent.com/urguide/cclimits/main/lib/cclimits.py
 chmod +x ~/.local/bin/cclimits
 ```
 
 Optionally add the tmux status-line wrapper (see [tmux Integration](#tmux-integration)):
 
 ```bash
-curl -o ~/.local/bin/cclimits-tmux https://raw.githubusercontent.com/urguide/cclimits/main/bin/cclimits-tmux
+curl -fLo ~/.local/bin/cclimits-tmux https://raw.githubusercontent.com/urguide/cclimits/main/bin/cclimits-tmux
 chmod +x ~/.local/bin/cclimits-tmux
 ```
 
 Make sure `~/.local/bin` is on your `PATH`.
+
+**Do not drop the `-f`.** Without it `curl` writes the body of an HTTP error
+response to the output file *and still exits 0*, so a CDN hiccup silently
+leaves a `404: Not Found` string or a Varnish `503` HTML page where the script
+should be. `chmod +x` then happily marks it executable and the failure only
+surfaces later as a frozen tmux status line. `-f` suppresses the body and
+returns exit 22 instead; `-L` follows redirects.
+
+`-f` cannot detect a *truncated* download (that is a successful 200), so it is
+worth confirming both files actually parse:
+
+```bash
+python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' ~/.local/bin/cclimits \
+  && bash -n ~/.local/bin/cclimits-tmux && echo "install OK"
+```
 
 ### System-wide (useful for tmux)
 
@@ -339,6 +354,8 @@ Override via environment variables:
 | `CCLIMITS_TMUX_TTL` | `180` | Seconds before the cache is refreshed |
 | `CCLIMITS_TMUX_WATCH_INTERVAL` | `2` | Seconds between complete status-line emissions |
 | `CCLIMITS_TMUX_PLACEHOLDER` | `cclimits...` | Line shown until the first lookup lands (set empty to disable) |
+| `CCLIMITS_TMUX_ERROR` | `cclimits!` | Line shown when the wrapper itself cannot run (corrupt/truncated install) |
+| `CCLIMITS_TMUX_SEP` | unset (`_`) | Display string replacing `--compact`'s `_` between providers |
 | `CCLIMITS_TMUX_ARGS` | `--claude --codex --grok --oneline both --compact --resets` | Arguments passed to `cclimits` |
 | `CCLIMITS_BIN` | auto-detected | Path to the `cclimits` executable |
 | `GROK_BIN` | `grok` | Official Grok executable used for safe session refresh |
@@ -356,6 +373,36 @@ To reclaim the columns spent on provider names, add `--icons` (see
 set-environment -g CCLIMITS_TMUX_ARGS "--claude --codex --grok --oneline both --compact --resets --icons"
 set -g status-right '#[fg=cyan]#(~/.local/bin/cclimits-tmux --watch)'
 ```
+
+#### Separator styling (`CCLIMITS_TMUX_SEP`)
+
+`--compact` separates providers with `_` to save columns. `CCLIMITS_TMUX_SEP`
+replaces that single character with any display string, including tmux `#[...]`
+style sequences — useful for matching the bar your pane and window dividers
+already use:
+
+```tmux
+set-environment -g CCLIMITS_TMUX_SEP "#[fg=#ff8800]┃#[fg=cyan]"
+```
+
+```
+Claude:41%/31%(4h/5d)┃Codex:27%(4d)┃Grok:68%(2d)
+```
+
+The trailing `#[fg=cyan]` is not optional: a tmux style persists to the end of
+the line, so without it every provider after the first separator is drawn in the
+bar's colour too.
+
+Substitution happens when the cached line is *served*, not when it is written,
+so the cache always holds the raw `_` form. A separator change therefore takes
+effect on the next redraw rather than after the refresh TTL, and the
+transient-failure detection below — which matches the raw `_`-delimited text —
+keeps working whatever separator you choose. The separator is inserted
+literally, so `#`, `|`, `&` and `\` need no escaping.
+
+`status-right-length` truncates on *rendered* width, so the `#[...]` sequences
+cost nothing; a single-cell bar like `┃` is exactly as wide as the `_` it
+replaced. Only a multi-character separator (e.g. `" ┃ "`) needs extra length.
 
 The wrapper keeps a stable last-known-good display cache, so the tmux segment
 does not disappear while a new argument-specific cache is warming up. If Grok's
@@ -414,6 +461,13 @@ silent one:
 - On a cold cache `--watch` emits `CCLIMITS_TMUX_PLACEHOLDER` until the first
   lookup lands. Emitting nothing would make tmux render its own
   `<'...' not ready>` marker instead.
+- If the wrapper cannot re-invoke itself it emits `CCLIMITS_TMUX_ERROR`
+  (`cclimits!`) rather than the placeholder. A running `--watch` loop is already
+  parsed into memory, so it keeps ticking even after the file underneath it is
+  truncated or overwritten — sharing one marker with the cold-cache case would
+  make a broken install look like a slow first lookup. Seeing `cclimits!`
+  means the installed script itself is bad: check `file $(command -v cclimits-tmux)`
+  and `bash -n $(command -v cclimits-tmux)`.
 - The wrapper calls `cclimits` without `--cached`, so no `(cached 42s)` suffix
   appears in the status line.
 

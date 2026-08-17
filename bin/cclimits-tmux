@@ -19,6 +19,8 @@
 #   CCLIMITS_TMUX_TTL    refresh interval in seconds (default: 180)
 #   CCLIMITS_TMUX_WATCH_INTERVAL  status emission interval (default: 2)
 #   CCLIMITS_TMUX_PLACEHOLDER  cold-cache placeholder line (default: cclimits...)
+#   CCLIMITS_TMUX_ERROR  line shown when the wrapper itself fails (default: cclimits!)
+#   CCLIMITS_TMUX_SEP    display separator replacing --compact's `_` (default: none)
 #   CCLIMITS_TMUX_ARGS   cclimits arguments (default: --claude --codex --grok --oneline both --compact --resets)
 #   CCLIMITS_BIN         path to the cclimits executable
 #   GROK_BIN             path to the official Grok executable (default: grok)
@@ -35,17 +37,31 @@ set -u
 # worse than a placeholder: tmux renders its own `<'...' not ready>` marker for
 # a job that has produced no line within a second.  So always emit a complete
 # line, falling back to a short placeholder until the first lookup lands.
+# Empty output and a *failed* self-invocation are different faults and must not
+# share one indicator. An empty line means "cache still cold" — expected, and it
+# resolves itself. A non-zero exit means this script could not run at all: it was
+# truncated or overwritten mid-download (a `curl -o` without `-f` stores HTTP
+# error bodies and still exits 0), its interpreter is missing, or the mode bits
+# were lost. That state never resolves itself and needs a visibly different
+# marker, otherwise the status line sits on the reassuring `cclimits...` forever
+# while the real cause is undiagnosable from the status line alone.
 if [ "${1:-}" = "--watch" ]; then
   WATCH_INTERVAL=${CCLIMITS_TMUX_WATCH_INTERVAL:-2}
   # Not ':-' — an explicitly empty placeholder is a valid choice (accepting
   # tmux's own marker) and must not silently revert to the default.
   PLACEHOLDER=${CCLIMITS_TMUX_PLACEHOLDER-cclimits...}
+  ERROR_LINE=${CCLIMITS_TMUX_ERROR-cclimits!}
   while :; do
-    watch_out=$("$0")
-    if [ -n "$watch_out" ]; then
-      printf '%s\n' "$watch_out"
+    # Capturing stderr keeps a broken self-invocation from spamming the tmux
+    # server log on every tick.
+    if watch_out=$("$0" 2>/dev/null); then
+      if [ -n "$watch_out" ]; then
+        printf '%s\n' "$watch_out"
+      else
+        printf '%s\n' "$PLACEHOLDER"
+      fi
     else
-      printf '%s\n' "$PLACEHOLDER"
+      printf '%s\n' "$ERROR_LINE"
     fi
     sleep "$WATCH_INTERVAL"
   done
@@ -81,12 +97,50 @@ else
   fi
 fi
 
+# The `_` between providers comes from --compact, which drops the wider ` | `
+# to save columns.  CCLIMITS_TMUX_SEP swaps that one character for an arbitrary
+# display string — typically a tmux style sequence drawing a coloured bar to
+# match the pane/window dividers, e.g.
+#   CCLIMITS_TMUX_SEP='#[fg=#ff8800]┃#[fg=cyan]'
+# The trailing style restores the status-right colour, since #[...] persists to
+# the end of the line.
+#
+# Substitution happens when *serving*, never when caching, for two reasons:
+# the transient-failure grep below matches the raw `:expired(_|$)` form and
+# would be defeated by an arbitrary separator, and a changed separator takes
+# effect on the next redraw instead of waiting out the refresh TTL.
+#
+# Consuming one `_`-delimited field at a time rather than `${line//_/$SEP}` or
+# sed, because both interpret the replacement text.  Bash 5.2+ expands an
+# unquoted `&` in a substitution replacement to the matched text, so a separator
+# like `#[fg=red]&` would emit a stray `_`; sed additionally reinterprets `&`,
+# `\` and the `|` many users pick as their bar character.  Passing the separator
+# as a printf *argument* keeps it byte-for-byte literal.
+serve() {
+  local file=$1 line rest
+  if [ -z "${CCLIMITS_TMUX_SEP:-}" ]; then
+    cat -- "$file"
+    return
+  fi
+  # `|| [ -n "$line" ]` also emits a final line with no trailing newline.
+  while IFS= read -r line || [ -n "$line" ]; do
+    rest=$line
+    # Stripping through the first `_` shortens the string, so this differs from
+    # $rest exactly while one remains.
+    while [ "${rest#*_}" != "$rest" ]; do
+      printf '%s%s' "${rest%%_*}" "$CCLIMITS_TMUX_SEP"
+      rest=${rest#*_}
+    done
+    printf '%s\n' "$rest"
+  done <"$file"
+}
+
 # Serve a value immediately. The stable display cache prevents a blank status
 # line when arguments change or an argument-keyed cache has not been built yet.
 if [ -s "$CACHE" ]; then
-  cat -- "$CACHE"
+  serve "$CACHE"
 elif [ -s "$DISPLAY_CACHE" ]; then
-  cat -- "$DISPLAY_CACHE"
+  serve "$DISPLAY_CACHE"
 fi
 
 # Refresh only if no lookup has been attempted within the last TTL seconds.
