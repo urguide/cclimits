@@ -15,9 +15,28 @@ def _write_executable(path: Path, body: str) -> Path:
     return path
 
 
+def _clean_env() -> dict[str, str]:
+    """os.environ minus every wrapper override.
+
+    A developer who actually uses the wrapper has these exported in their own
+    shell — the README recommends exactly that — and they would otherwise leak
+    in and rewrite the output every assertion here is written against.  An
+    exported CCLIMITS_TMUX_SEP alone fails five of these tests.  Drop them all so
+    the suite exercises the wrapper's defaults rather than the developer's
+    configuration; each test opts back in explicitly via **extra.
+    """
+    env = os.environ.copy()
+    for var in ("CCLIMITS_TMUX_SEP", "CCLIMITS_TMUX_PLACEHOLDER",
+                "CCLIMITS_TMUX_ERROR", "CCLIMITS_TMUX_WATCH_INTERVAL",
+                "CCLIMITS_TMUX_ARGS", "CCLIMITS_TMUX_TTL",
+                "CCLIMITS_BIN", "GROK_BIN"):
+        env.pop(var, None)
+    return env
+
+
 def _run_wrapper(tmp_path: Path, cclimits: Path, *, args: str, grok: Path | None = None,
                  **extra: str) -> str:
-    env = os.environ.copy()
+    env = _clean_env()
     env.update({
         "TMPDIR": str(tmp_path),
         "CCLIMITS_BIN": str(cclimits),
@@ -165,7 +184,7 @@ fi
 
 
 def _read_watch_lines(tmp_path: Path, cclimits: Path, count: int, **extra: str) -> list[str]:
-    env = os.environ.copy()
+    env = _clean_env()
     env.update({
         "TMPDIR": str(tmp_path),
         "CCLIMITS_BIN": str(cclimits),

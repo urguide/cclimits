@@ -129,9 +129,16 @@ Claude: 4.0%/10.0% ✅ ↻2h15m/3d17h | Codex: 0%/2% ✅ ↻1h05m/6d23h | Z.AI: 
 
 # --resets in both mode also shows Z.AI's monthly MCP-tools reset as the second countdown
 Z.AI: 1%/16% ✅ ↻3h28m/5d10h
+
+# A countdown the API does not supply renders as `-`, so the remaining value
+# stays unambiguous. Claude reports no 5h reset while that window is idle:
+Claude: 0.0%/61.0% ✅ ↻-/21h50m
+Claude:0%/61%(-/22h)              # ...and the same line under --compact
 ```
 
 Status icons: ✅ ok · ⚠️ high usage · ❌ error · 🔑 no credentials found · ⏰ token expired. Cached results (`--cached`) are suffixed with their age, e.g. `(cached 42s)`.
+
+In a two-window countdown, `-` marks a reset the provider did not report — the first slot is always the 5h/rolling window and the second the weekly one, so `↻-/21h50m` is unambiguously "no 5h reset, 21h50m until the weekly one". Providers that expose a single window (Grok, Antigravity, Gemini, and Codex plans without a 5h window) keep their `(7d)`/`(5h)` label and print no countdown at all when none is available.
 
 ### Provider glyphs (`--icons`)
 

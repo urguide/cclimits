@@ -2479,10 +2479,33 @@ def get_status_icon(pct: float) -> str:
 
 # Shared oneline formatting helpers
 
-def _reset_suffix(*resets):
-    """Compact '↻a/b' suffix from reset strings; None if nothing usable."""
-    vals = [r.replace(" ", "") for r in resets if r and r != "N/A"]
-    return f"↻{'/'.join(vals)}" if vals else None
+def _reset_suffix(*resets, placeholder="-"):
+    """Compact '↻a/b' suffix from reset strings; None if nothing usable.
+
+    A missing or "N/A" value renders as *placeholder* rather than being dropped,
+    because in a multi-value suffix the slot *position* carries the meaning:
+    `↻-/13h51m` says the surviving countdown is the 7d one.  Silently omitting
+    the absent value instead yields a bare `↻13h51m` that could belong to either
+    window — the ambiguity this placeholder exists to remove.  Claude's 5h window
+    reports `resets_at: null` whenever it is idle, so the ambiguous form is the
+    common case, not an edge case.
+
+    When *every* slot is a placeholder the suffix is dropped entirely.  There is
+    then no position left to disambiguate, so `↻-` would add nothing — and it is
+    actively harmful: `_compact_oneline()` lets a countdown supersede the static
+    window label, so a lone placeholder would replace a useful `(5h)`/`(7d)` with
+    `(-)`.  This rule is what keeps single-window providers (Grok, Antigravity,
+    Gemini, and weekly-only Codex) rendering exactly as before.
+    """
+    vals = []
+    for r in resets:
+        if r and r != "N/A":
+            vals.append(r.replace(" ", ""))
+        elif placeholder:
+            vals.append(placeholder)
+    if not vals or (placeholder and all(v == placeholder for v in vals)):
+        return None
+    return f"↻{'/'.join(vals)}"
 
 
 def _fmt_both(label, s5, s7, use_color):
@@ -2522,6 +2545,10 @@ def _compact_oneline(rendered: str) -> str:
     rendered = rendered.replace("🔑", "no key").replace("⏰", "expired").replace("❌", "ERR")
 
     def compact_reset(value: str) -> str:
+        # Every group is optional, so this matches "" as well — but the caller
+        # splits on "/" and _reset_suffix never emits an empty field, so the
+        # only non-time value reaching here is the `-` placeholder, which fails
+        # the match and is returned unchanged.
         match = re.fullmatch(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?", value)
         if not match:
             return value
@@ -2533,12 +2560,15 @@ def _compact_oneline(rendered: str) -> str:
             return f"{math.ceil(total_minutes / 60)}h"
         return f"{max(1, total_minutes)}m"
 
-    reset_match = re.search(r" ↻([0-9dhm/]+)", rendered)
+    # `-` is last in the character class so it is a literal, not a range.  It
+    # must be accepted or a placeholder-bearing suffix is left uncompacted and
+    # the raw `↻` leaks into the status line.
+    reset_match = re.search(r" ↻([0-9dhm/-]+)", rendered)
     if reset_match:
         compacted = "/".join(compact_reset(v) for v in reset_match.group(1).split("/"))
         rendered = rendered[:reset_match.start()] + f" ({compacted})" + rendered[reset_match.end():]
         # The reset countdown supersedes the provider's static window label.
-        rendered = re.sub(r" \((?:5h|7d|monthly)\)(?= \([0-9dhm/]+\)$)", "", rendered)
+        rendered = re.sub(r" \((?:5h|7d|monthly)\)(?= \([0-9dhm/-]+\)$)", "", rendered)
     # Tight tmux form: Label:99%(4h), while preserving semantic spaces inside
     # error text such as "no key".
     rendered = re.sub(r":\s+", ":", rendered, count=1)

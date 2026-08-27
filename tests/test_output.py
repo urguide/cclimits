@@ -861,6 +861,88 @@ class TestOnelineResets:
         assert "Z.AI: 30.0%/25%" in out and "↻1h5m/6d1h" in out
 
 
+class TestOnelineResetPlaceholder:
+    """A missing countdown in a dual-window suffix renders as `-`.
+
+    Claude's 5h window reports `resets_at: null` whenever it is idle, so the
+    percentages stay correct (`0%/61%`) while only the countdown vanishes.
+    Dropping the absent value left a bare `(14h)` that could be either window's
+    reset — the ambiguity these tests pin down.
+    """
+
+    IDLE_5H = {"claude": {"status": "ok",
+                          "five_hour": {"used": "0.0%", "resets_in": "N/A"},
+                          "seven_day": {"used": "61.0%", "resets_in": "13h 51m"}}}
+
+    def test_absent_first_window_keeps_its_slot(self, capsys):
+        print_oneline(self.IDLE_5H, "both", compact=True, show_resets=True)
+        assert capsys.readouterr().out == "Claude:0%/61%(-/14h)\n"
+
+    def test_placeholder_in_non_compact_output(self, capsys):
+        print_oneline(self.IDLE_5H, "both", show_resets=True)
+        assert "↻-/13h51m" in capsys.readouterr().out
+
+    def test_absent_key_is_treated_as_absent_value(self, capsys):
+        """`resets_in` is only *set* when present, so the key can be missing."""
+        results = {"codex": {"status": "ok",
+                             "primary_window": {"used": "5%"},
+                             "secondary_window": {"used": "9%", "resets_in": "6d"}}}
+        print_oneline(results, "both", compact=True, show_resets=True)
+        assert capsys.readouterr().out == "Codex:5%/9%(-/6d)\n"
+
+    def test_absent_second_window_invents_no_countdown(self, capsys):
+        """The placeholder must survive compaction as `-`.
+
+        Asserting on "1m" too: an earlier draft that left the `-` out of
+        _compact_oneline's character class produced `(5h/)-`, and the empty
+        field that creates would compact to "1m" — a reset invented out of
+        nothing, which is worse than the ambiguity being fixed.
+        """
+        results = {"claude": {"status": "ok",
+                              "five_hour": {"used": "0.0%", "resets_in": "4h 51m"},
+                              "seven_day": {"used": "61.0%"}}}
+        print_oneline(results, "both", compact=True, show_resets=True)
+        out = capsys.readouterr().out
+        assert out == "Claude:0%/61%(5h/-)\n"
+        assert "1m" not in out
+
+    def test_all_slots_absent_emits_no_suffix(self, capsys):
+        """`(-/-)` is pure noise: no position is left to disambiguate."""
+        results = {"claude": {"status": "ok",
+                              "five_hour": {"used": "0.0%"},
+                              "seven_day": {"used": "61.0%"}}}
+        print_oneline(results, "both", compact=True, show_resets=True)
+        assert capsys.readouterr().out == "Claude:0%/61%\n"
+
+    # Invariants: single-value suffixes must be untouched, because a lone
+    # placeholder would trigger _compact_oneline's "countdown supersedes window
+    # label" rule and replace a useful (5h)/(7d) with a useless (-).
+
+    def test_single_window_keeps_its_label_not_a_placeholder(self, capsys):
+        results = {"claude": {"status": "ok",
+                              "five_hour": {"used": "0.0%", "resets_in": "N/A"}}}
+        print_oneline(results, "5h", compact=True, show_resets=True)
+        assert capsys.readouterr().out == "Claude:0%(5h)\n"
+
+    def test_weekly_only_codex_is_unchanged(self, capsys):
+        """Higher Codex tiers expose no 5h window; that must stay a clean (7d)."""
+        results = {"codex": {"status": "ok",
+                             "secondary_window": {"used": "9%", "resets_in": "6d 3h"}}}
+        print_oneline(results, "both", compact=True, show_resets=True)
+        assert capsys.readouterr().out == "Codex:9%(7d)\n"
+
+    @pytest.mark.parametrize("results,expected", [
+        ({"grok": {"status": "ok", "credit_usage": {"percentage": 55, "period": "7d"}}},
+         "Grok: 55% (7d) ✅\n"),
+        ({"antigravity": {"status": "ok",
+                          "summary": {"min_remaining_pct": 97, "model_count": 20}}},
+         "Antigravity: 3% (20 models) ✅\n"),
+    ])
+    def test_single_value_providers_omit_absent_resets(self, results, expected, capsys):
+        print_oneline(results, "both", show_resets=True)
+        assert capsys.readouterr().out == expected
+
+
 class TestOnelineCacheAge:
     """Cached oneline output is labeled with its age."""
 
