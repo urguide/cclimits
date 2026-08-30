@@ -1,5 +1,13 @@
 # Recent Deltas (Last 3-5 Changes)
 
+## 2026-08-30: One Expired Provider Froze Every tmux Reading
+
+- **Symptom**: Grok's live billing API had rolled into a new weekly period and returned `0%`, but tmux remained at `22%(8h)` because Claude was expired in the same status line.
+- **Root cause**: `bin/cclimits-tmux` rejected the entire refreshed line when any field contained `ERR`/`expired`. Last-good protection was line-wide rather than provider-scoped, so one provider's auth choice or outage froze every healthy provider.
+- **Fix**: transient fields are now merged by provider label with the matching prior good field. Healthy fields always advance; a single-provider transient failure still keeps its last good value. `no key` remains an accepted stable state and deliberately replaces an old reading when the user logs out or chooses not to configure that provider.
+- **Tests**: wrapper coverage adds mixed healthy/expired advancement and logged-out `no key` replacement cases.
+- **Files**: `bin/cclimits-tmux`, `tests/test_tmux_wrapper.py`, `README.md`, `memory-bank/deltas.md`, `memory-bank/progress.md`
+
 ## 2026-08-27: Idle Claude 5h Window Collapsed a Dual Countdown Into an Ambiguous One
 
 - **Symptom**: the tmux line showed `Claude:0%/61%(14h)` — one countdown where two were expected, with no way to tell whether `14h` was the 5h or the 7d reset.

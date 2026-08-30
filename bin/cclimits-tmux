@@ -135,6 +135,59 @@ serve() {
   done <"$file"
 }
 
+is_transient_field() {
+  case $1 in
+    *❌*|*⏰*|*ERR*|*:expired) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_prior_reading() {
+  case $1 in
+    *❌*|*⏰*|*ERR*|*:expired|*🔑*|*:no\ key) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# Replace only failed provider fields with their matching prior readings. A
+# Claude outage must not freeze a fresh Grok value (or vice versa), while a
+# single-provider view retains the same last-good behavior as before.
+merge_last_good() {
+  local fresh_file=$1 old_file=$2 output_file=$3
+  local fresh old fresh_rest old_rest field old_field label replacement merged=""
+
+  IFS= read -r fresh <"$fresh_file" || [ -n "$fresh" ]
+  IFS= read -r old <"$old_file" || [ -n "$old" ]
+  fresh_rest=$fresh
+
+  while :; do
+    field=${fresh_rest%%_*}
+    replacement=$field
+    if is_transient_field "$field"; then
+      label=${field%%:*}
+      old_rest=$old
+      while :; do
+        old_field=${old_rest%%_*}
+        if [ "${old_field%%:*}" = "$label" ] && is_prior_reading "$old_field"; then
+          replacement=$old_field
+          break
+        fi
+        [ "$old_rest" = "${old_rest#*_}" ] && break
+        old_rest=${old_rest#*_}
+      done
+    fi
+
+    if [ -n "$merged" ]; then
+      merged="${merged}_"
+    fi
+    merged="${merged}${replacement}"
+    [ "$fresh_rest" = "${fresh_rest#*_}" ] && break
+    fresh_rest=${fresh_rest#*_}
+  done
+
+  printf '%s\n' "$merged" >"$output_file"
+}
+
 # Serve a value immediately. The stable display cache prevents a blank status
 # line when arguments change or an argument-keyed cache has not been built yet.
 if [ -s "$CACHE" ]; then
@@ -174,8 +227,9 @@ if [ ! -f "$LEASE" ] || [ $(( $(date +%s) - $(stat -c %Y -- "$LEASE") )) -ge "$T
     fi
 
     # cclimits exits 0 even when a provider lookup fails, marking the entry
-    # with a failure icon instead.  Treat *transient* failures as a failure so
-    # an outage never overwrites a good reading.
+    # with a failure icon instead. Preserve the prior reading for each failed
+    # provider independently, so healthy providers from the same refresh still
+    # advance.
     #
     # Only transient states qualify: an API error (❌/ERR) or an expired token
     # (⏰/expired) can succeed on the next attempt, so the last good reading is
@@ -184,14 +238,14 @@ if [ ! -f "$LEASE" ] || [ $(( $(date +%s) - $(stat -c %Y -- "$LEASE") )) -ge "$T
     # failure would reject every refresh forever, freezing the percentages of
     # the providers that *are* working (e.g. `Grok:no key` in an otherwise
     # healthy `Claude:…_Codex:…_Grok:no key` line).
-    if [ ! -s "$CACHE.tmp" ] || grep -qE '❌|⏰|ERR|:expired(_|$)' -- "$CACHE.tmp"; then
-      # No prior reading to protect: show the failure rather than nothing.
-      if [ ! -s "$CACHE" ] && [ -s "$CACHE.tmp" ]; then
-        mv -- "$CACHE.tmp" "$CACHE"
-        cp -- "$CACHE" "$DISPLAY_TMP" && mv -- "$DISPLAY_TMP" "$DISPLAY_CACHE"
-      fi
+    if [ ! -s "$CACHE.tmp" ]; then
       rm -f -- "$CACHE.tmp"
       exit 0
+    fi
+
+    if [ -s "$CACHE" ]; then
+      merge_last_good "$CACHE.tmp" "$CACHE" "$CACHE.merged"
+      mv -- "$CACHE.merged" "$CACHE.tmp"
     fi
 
     mv -- "$CACHE.tmp" "$CACHE"

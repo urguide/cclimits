@@ -419,11 +419,11 @@ write-back to the official CLI without sending a model prompt or consuming
 Grok Build credits. That trigger recognises both the `Grok` label and its
 `--icons` glyph, so enabling icons does not disable auto-refresh.
 
-A refresh that reports a *transient* failure — an API error (`ERR`) or an
-expired token (`expired`) — is discarded so it cannot overwrite a good reading.
-A missing credential (`no key`) is not transient: retrying cannot change it, so
-it is accepted normally. Otherwise a single unconfigured provider would reject
-every refresh forever and freeze the percentages of the providers that do work.
+A provider that reports a *transient* failure — an API error (`ERR`) or an
+expired token (`expired`) — keeps its own last good reading, while healthy
+providers from the same refresh still update. A missing credential (`no key`)
+is not transient and is accepted normally, so choosing not to log in replaces
+that provider's old reading without freezing the providers that do work.
 
 `cclimits` is resolved in this order: `$CCLIMITS_BIN`, then a sibling
 `../lib/cclimits.py` (when run from a git checkout), then `PATH`.

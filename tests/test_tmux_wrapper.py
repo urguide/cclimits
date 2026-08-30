@@ -153,6 +153,33 @@ fi
     assert _run_wrapper(tmp_path, cclimits, args="--grok").strip() == "Grok:55%(7d)"
 
 
+def test_failed_provider_does_not_freeze_healthy_providers(tmp_path):
+    """Last-good protection applies per provider, not to the whole status line."""
+    state = tmp_path / "second"
+    cclimits = _write_executable(tmp_path / "fake-cclimits", f"""
+if [ -f {state!s} ]; then
+  printf 'Claude:expired_Codex:12%%(7d)_Grok:0%%(7d)\\n'
+else
+  printf 'Claude:40%%(2h)_Codex:11%%(7d)_Grok:22%%(8h)\\n'
+fi
+""")
+
+    _run_wrapper(tmp_path, cclimits, args="--all")
+    _wait_for_output(
+        tmp_path, cclimits, args="--all",
+        expected="Claude:40%(2h)_Codex:11%(7d)_Grok:22%(8h)",
+    )
+    state.touch()
+
+    for lease in tmp_path.glob("*.lease"):
+        lease.unlink()
+    _run_wrapper(tmp_path, cclimits, args="--all")
+    _wait_for_output(
+        tmp_path, cclimits, args="--all",
+        expected="Claude:40%(2h)_Codex:12%(7d)_Grok:0%(7d)",
+    )
+
+
 def test_missing_credentials_do_not_block_refresh(tmp_path):
     """`no key` is a stable config state, not a transient failure to protect against.
 
@@ -175,6 +202,31 @@ fi
     state.touch()
 
     # Force another lease cycle without deleting the existing cache.
+    for lease in tmp_path.glob("*.lease"):
+        lease.unlink()
+    _run_wrapper(tmp_path, cclimits, args="--all")
+    _wait_for_output(
+        tmp_path, cclimits, args="--all", expected="Claude:22%(2h)_Grok:no key",
+    )
+
+
+def test_logged_out_provider_replaces_its_old_reading_with_no_key(tmp_path):
+    """Choosing not to log in must be visible instead of preserving stale usage."""
+    state = tmp_path / "logged-out"
+    cclimits = _write_executable(tmp_path / "fake-cclimits", f"""
+if [ -f {state!s} ]; then
+  printf 'Claude:22%%(2h)_Grok:no key\\n'
+else
+  printf 'Claude:11%%(2h)_Grok:55%%(7d)\\n'
+fi
+""")
+
+    _run_wrapper(tmp_path, cclimits, args="--all")
+    _wait_for_output(
+        tmp_path, cclimits, args="--all", expected="Claude:11%(2h)_Grok:55%(7d)",
+    )
+    state.touch()
+
     for lease in tmp_path.glob("*.lease"):
         lease.unlink()
     _run_wrapper(tmp_path, cclimits, args="--all")
