@@ -26,6 +26,24 @@ def get_claude_credentials() -> str | None:
 
 **Priority**: Platform-specific → Config files → Environment variables
 
+Claude discovery retains the selected source as `(token, path_or_none)`.
+Only file-backed selections can refresh; Keychain/env tokens never borrow a
+different file's refresh token. Re-reads stay pinned to the locked path.
+
+Rotating Claude/Codex refreshes require locks and a synced private staging file
+before the HTTP exchange. `staged_json_write` also backs `write_json_secure`.
+Post-exchange write failures preserve recovery data and report its path on stderr.
+
+## Cache Persistence
+
+Version 2 stores `entries[provider] = {timestamp, data}`. Retained entries keep
+their timestamp across partial runs and failures. Normal reads require all
+selected entries within TTL; stale reads filter per provider against 24h.
+`read_cache` returns `(data, ages_by_provider)`; JSON output does not expose
+internal cache envelopes. The legacy global timestamp is unsafe to migrate and
+is treated as a miss. Read/merge/write uses `credential_lock` and unique temp
+files so concurrent processes neither corrupt JSON nor lose partial updates.
+
 ## HTTP Client Pattern
 
 Dual implementation for zero-dependency operation:

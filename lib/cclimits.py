@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -104,35 +105,49 @@ def get_cache_path() -> Path:
         pass  # Silently fail if we can't create directory
     return CACHE_FILE
 
-def read_cache(ttl: int, max_age: int | None = None) -> tuple[dict, int] | None:
-    """Read cache if fresh, return (data, age_seconds) or None.
-
-    Normally freshness is bounded by *ttl*.  When *max_age* is given the ttl
-    is ignored and entries up to *max_age* seconds old are returned — used by
-    the stale-cache fallback to serve the last good reading when a live
-    fetch hits a transient error.
-    """
+def _read_cache_entries() -> dict:
+    """Read versioned entries; legacy global timestamps cannot establish freshness."""
     try:
-        cache_file = get_cache_path()
-        if not cache_file.exists():
+        with open(get_cache_path(), 'r') as f:
+            stored = json.load(f)
+        if not isinstance(stored, dict) or stored.get("version") != 2:
+            return {}
+        entries = stored.get("entries")
+        if not isinstance(entries, dict):
+            return {}
+        return {
+            key: entry for key, entry in entries.items()
+            if isinstance(entry, dict) and isinstance(entry.get("data"), dict)
+            and isinstance(entry.get("timestamp"), (int, float))
+            and math.isfinite(entry["timestamp"])
+            and 0 <= entry["timestamp"] <= time.time()
+        }
+    except (ValueError, OSError, TypeError, OverflowError):
+        return {}
+
+
+def read_cache(ttl: int, max_age: int | None = None,
+               providers: list[str] | None = None) -> tuple[dict, dict] | None:
+    """Return data and per-provider ages; a normal hit requires all selected entries.
+
+    Stale-fallback reads instead return only entries younger than max_age.
+    """
+    entries = _read_cache_entries()
+    selected = providers if providers is not None else list(entries)
+    data, ages = {}, {}
+    now = time.time()
+    bound = max_age if max_age is not None else ttl
+    for key in selected:
+        entry = entries.get(key)
+        age = now - entry["timestamp"] if entry else float("inf")
+        if 0 <= age < bound:
+            data[key] = entry["data"]
+            ages[key] = int(age)
+        elif max_age is None:
             return None
-
-        with open(cache_file, 'r') as f:
-            cache_data = json.load(f)
-
-        # Check cache structure
-        if not isinstance(cache_data, dict) or "timestamp" not in cache_data or "data" not in cache_data:
-            return None
-
-        # Check if cache is fresh
-        cache_age = time.time() - cache_data["timestamp"]
-        bound = max_age if max_age is not None else ttl
-        if cache_age < bound:
-            return cache_data["data"], int(cache_age)
-
+    if not data:
         return None
-    except (json.JSONDecodeError, KeyError, TypeError, OSError, PermissionError):
-        return None
+    return data, ages
 
 NO_CREDS_ERROR = "No credentials found"
 
@@ -170,7 +185,8 @@ def _is_transient_error(data: object) -> bool:
 
 def _is_good_cache_entry(data: object) -> bool:
     """A cached entry is 'good' if it carries a successful status."""
-    return isinstance(data, dict) and data.get("status") in ("ok", "authenticated")
+    return (isinstance(data, dict) and data.get("status") in ("ok", "authenticated")
+            and "error" not in data and data.get("token_status") != "expired")
 
 
 def format_cache_age(seconds: int) -> str:
@@ -198,31 +214,26 @@ def merge_cache_data(old: dict, new: dict) -> dict:
     return merged
 
 def write_cache(data: dict) -> bool:
-    """Write data to cache file, return success status"""
+    """Merge under a lock, retaining each preserved entry's original timestamp."""
     try:
         cache_file = get_cache_path()
-        old_data = {}
-        try:
-            with open(cache_file, 'r') as f:
-                old_data = json.load(f).get("data") or {}
-        except (json.JSONDecodeError, KeyError, TypeError, OSError, PermissionError, AttributeError):
-            old_data = {}
-        cache_data = {
-            "timestamp": time.time(),
-            "data": merge_cache_data(old_data, data)
-        }
-        # Atomic write: concurrent runs (cron/statusline vs interactive) must
-        # never see a half-written cache file
-        tmp_file = cache_file.with_suffix(".json.tmp")
-        with open(tmp_file, 'w') as f:
-            json.dump(cache_data, f, indent=2)
-        os.replace(tmp_file, cache_file)
+        with credential_lock(cache_file) as acquired:
+            if not acquired:
+                return False
+            entries = _read_cache_entries()
+            old_data = {key: entry["data"] for key, entry in entries.items()}
+            merged = merge_cache_data(old_data, data)
+            now = time.time()
+            for key, value in merged.items():
+                if key not in old_data or value is not old_data[key]:
+                    entries[key] = {"timestamp": now, "data": value}
+            write_json_secure(cache_file, {"version": 2, "entries": entries})
         return True
     except (OSError, PermissionError, TypeError):
         return False
 
 
-def apply_stale_fallback(results: dict, cached_data: dict, cached_age: int,
+def apply_stale_fallback(results: dict, cached_data: dict, cached_age: dict,
                          max_age: int = STALE_CACHE_MAX_AGE) -> dict:
     """Replace transient-error entries with stale-but-good cached entries.
 
@@ -232,15 +243,14 @@ def apply_stale_fallback(results: dict, cached_data: dict, cached_age: int,
     non-transient (no creds, expired token, 401/invalid key), are left
     unchanged.
     """
-    if cached_age >= max_age:
-        return results
     updated = dict(results)
     for key, data in results.items():
-        if _is_transient_error(data):
+        age = cached_age.get(key, max_age)
+        if 0 <= age < max_age and _is_transient_error(data):
             cached_entry = cached_data.get(key)
             if isinstance(cached_entry, dict) and _is_good_cache_entry(cached_entry):
                 stale = dict(cached_entry)
-                stale["stale_age_seconds"] = cached_age
+                stale["stale_age_seconds"] = age
                 stale["stale_fallback"] = True
                 updated[key] = stale
     return updated
@@ -386,35 +396,55 @@ def token_refresh_enabled() -> bool:
     )
 
 
-def write_json_secure(path: Path, data: dict) -> None:
-    """Atomically write *data* to *path* with 0600 permissions.
-
-    Create the temp file 0600 via os.open so the token never touches disk
-    world-readable (a write_text() + chmod() leaves a window, and umask would
-    otherwise decide the mode).  Raises on failure — callers decide whether a
-    failed write is fatal.
-    """
-    temp_path = path.with_name(path.name + ".tmp")
-    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+@contextlib.contextmanager
+def staged_json_write(path: Path, initial: dict | None = None):
+    """Prepare a private sibling file before an irreversible token exchange."""
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    temp_path = Path(name)
+    keep = False
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-    except BaseException:
-        temp_path.unlink(missing_ok=True)
-        raise
-    # O_CREAT honors the mode only for a *new* file; enforce 0600 in case the
-    # temp file pre-existed.
-    os.chmod(temp_path, 0o600)
-    os.replace(temp_path, path)
+            if initial is not None:
+                json.dump(initial, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+
+            def commit(data):
+                nonlocal keep
+                payload = json.dumps(data, indent=2)
+                try:
+                    f.seek(0)
+                    f.write(payload)
+                    f.truncate()
+                    f.flush()
+                    os.fsync(f.fileno())
+                    f.close()
+                    os.replace(temp_path, path)
+                except OSError as exc:
+                    # Preserve recovery data after rotation, even if fsync or
+                    # rename failed. A write error may leave incomplete JSON.
+                    keep = True
+                    raise OSError(f"Could not save {path}; check recovery data at {temp_path}: {exc}") from exc
+
+            yield commit
+    finally:
+        if not keep:
+            temp_path.unlink(missing_ok=True)
+
+
+def write_json_secure(path: Path, data: dict) -> None:
+    """Atomically write JSON using a unique 0600 temporary file."""
+    with staged_json_write(path) as commit:
+        commit(data)
 
 
 @contextlib.contextmanager
 def credential_lock(path: Path):
-    """Serialize refresh+write against other cclimits processes.
+    """Serialize read/modify/write against other cclimits processes.
 
     Yields True when the lock was acquired, False when it wasn't within
-    TOKEN_LOCK_TIMEOUT (another process is already refreshing — the caller
-    should keep using the token it has rather than block a status line).
+    TOKEN_LOCK_TIMEOUT, or when locking is unsupported or fails. Used by
+    credential refresh and cache merging; neither may write without a lock.
 
     This only coordinates cclimits with itself: neither Claude Code nor codex
     takes a file lock on their credential files, so a genuinely simultaneous
@@ -424,15 +454,14 @@ def credential_lock(path: Path):
     try:
         import fcntl
     except ImportError:  # pragma: no cover - Windows
-        yield True
+        yield False
         return
 
     try:
         fd = os.open(path.with_name(path.name + ".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
     except (OSError, PermissionError):
-        # Can't even create a lock file (read-only home, odd perms) — proceed
-        # unlocked rather than never refreshing.
-        yield True
+        # Never rotate a token unless we can coordinate and persist it safely.
+        yield False
         return
 
     acquired = False
@@ -487,10 +516,6 @@ def claude_refresh_lock(cred_path: Path):
         except FileExistsError:
             pass
         except OSError:
-            # Can't create it at all (odd perms, read-only home).  Our own
-            # flock still serializes cclimits against itself, so refresh
-            # rather than never recovering.
-            proceed = True
             break
 
         try:
@@ -553,7 +578,12 @@ CLAUDE_CRED_PATHS = [
 
 
 def get_claude_credentials() -> str | None:
-    """Get Claude Code OAuth token from various sources"""
+    """Get Claude Code OAuth token from the highest-priority source."""
+    return _get_claude_credential_source()[0]
+
+
+def _get_claude_credential_source() -> tuple[str | None, Path | None]:
+    """Return the selected token and its writable file, if it came from one."""
 
     # Method 1: macOS Keychain
     if sys.platform == "darwin":
@@ -565,36 +595,28 @@ def get_claude_credentials() -> str | None:
             if result.returncode == 0:
                 creds = json.loads(result.stdout.strip())
                 # Handle nested structure: claudeAiOauth.accessToken
-                if "claudeAiOauth" in creds:
-                    return creds["claudeAiOauth"].get("accessToken")
-                return creds.get("accessToken")
+                oauth = creds.get("claudeAiOauth", creds)
+                if token := oauth.get("accessToken"):
+                    return token, None
         except:
             pass
 
     # Method 2: Linux credentials file (actual location)
-    for cred_path in CLAUDE_CRED_PATHS:
-        if cred_path.exists():
-            try:
-                creds = json.loads(cred_path.read_text())
-                # Handle nested structure: claudeAiOauth.accessToken
-                if "claudeAiOauth" in creds:
-                    return creds["claudeAiOauth"].get("accessToken")
-                return creds.get("accessToken")
-            except:
-                pass
+    if found := _read_claude_cred_file():
+        return found[2]["accessToken"], found[0]
 
     # Method 3: Environment variable
-    return os.environ.get("CLAUDE_ACCESS_TOKEN")
+    return os.environ.get("CLAUDE_ACCESS_TOKEN"), None
 
 
-def _read_claude_cred_file() -> tuple[Path, dict, dict] | None:
+def _read_claude_cred_file(path: Path | None = None) -> tuple[Path, dict, dict] | None:
     """Return (path, whole_file, oauth_section) for Claude's credential file.
 
     The file is either ``{"claudeAiOauth": {...}}`` (what Claude Code writes)
     or a flat object; ``oauth_section`` is the dict holding the token either
     way, so callers can mutate it in place and write ``whole_file`` back.
     """
-    for cred_path in CLAUDE_CRED_PATHS:
+    for cred_path in ([path] if path is not None else CLAUDE_CRED_PATHS):
         if not cred_path.exists():
             continue
         try:
@@ -643,14 +665,12 @@ def ensure_claude_token(force: bool = False) -> str | None:
     Falls back to the plain stored token whenever refresh isn't possible:
     opted out, no refresh token, macOS Keychain storage, or a failed exchange.
     """
-    token = get_claude_credentials()
-    if not token or not token_refresh_enabled():
+    token, cred_path = _get_claude_credential_source()
+    if not token or cred_path is None or not token_refresh_enabled():
         return token
 
-    found = _read_claude_cred_file()
+    found = _read_claude_cred_file(cred_path)
     if not found:
-        # Keychain- or env-sourced token: we can read it but have nowhere safe
-        # to write a new one back, so leave it alone.
         return token
     cred_path, _, oauth = found
 
@@ -666,12 +686,12 @@ def ensure_claude_token(force: bool = False) -> str | None:
         with claude_refresh_lock(cred_path) as clear:
             if not clear:
                 # Claude Code is mid-refresh; whatever it writes wins.
-                found = _read_claude_cred_file()
+                found = _read_claude_cred_file(cred_path)
                 return found[2].get("accessToken") if found else token
 
             # Re-read holding both locks: another cclimits process — or Claude
             # Code, which we just waited out — may have refreshed already.
-            found = _read_claude_cred_file()
+            found = _read_claude_cred_file(cred_path)
             if not found:
                 return token
             cred_path, creds, oauth = found
@@ -690,30 +710,27 @@ def ensure_claude_token(force: bool = False) -> str | None:
             if not refresh_token:
                 return current or token
 
-            new_tokens = refresh_claude_token(refresh_token)
-            if not new_tokens:
-                return current or token
-
-            oauth["accessToken"] = new_tokens["access_token"]
-            expires_in = new_tokens.get("expires_in")
-            if isinstance(expires_in, (int, float)):
-                oauth["expiresAt"] = int((time.time() + expires_in) * 1000)
-            # Anthropic rotates the refresh token on every exchange (verified
-            # live), so persisting the new one is mandatory — drop it and
-            # Claude Code is left holding a token the server has retired.
-            if new_tokens.get("refresh_token"):
-                oauth["refreshToken"] = new_tokens["refresh_token"]
-                rt_expires_in = new_tokens.get("refresh_token_expires_in")
-                if isinstance(rt_expires_in, (int, float)):
-                    oauth["refreshTokenExpiresAt"] = int((time.time() + rt_expires_in) * 1000)
-
+            new_tokens = None
             try:
-                write_json_secure(cred_path, creds)
-            except (OSError, PermissionError, TypeError) as e:
-                # The in-memory token still works for this run.
-                print(f"Warning: Could not save refreshed Claude token: {e}", file=sys.stderr)
+                with staged_json_write(cred_path, creds) as commit:
+                    new_tokens = refresh_claude_token(refresh_token)
+                    if not new_tokens:
+                        return current or token
 
-            return new_tokens["access_token"]
+                    oauth["accessToken"] = new_tokens["access_token"]
+                    expires_in = new_tokens.get("expires_in")
+                    if isinstance(expires_in, (int, float)):
+                        oauth["expiresAt"] = int((time.time() + expires_in) * 1000)
+                    if new_tokens.get("refresh_token"):
+                        oauth["refreshToken"] = new_tokens["refresh_token"]
+                        rt_expires_in = new_tokens.get("refresh_token_expires_in")
+                        if isinstance(rt_expires_in, (int, float)):
+                            oauth["refreshTokenExpiresAt"] = int((time.time() + rt_expires_in) * 1000)
+                    commit(creds)
+            except (OSError, PermissionError, TypeError) as e:
+                print(f"Warning: Could not refresh/save Claude token: {e}", file=sys.stderr)
+
+            return new_tokens["access_token"] if new_tokens else current or token
 
 
 def _claude_usage_request(token: str) -> tuple[int, dict | str]:
@@ -803,14 +820,14 @@ def get_openai_credentials() -> dict:
     return result
 
 
-def _read_codex_auth_file() -> tuple[Path, dict, dict] | None:
+def _read_codex_auth_file(path: Path | None = None) -> tuple[Path, dict, dict] | None:
     """Return (path, whole_file, tokens_section) for Codex's auth.json.
 
     Picks the last path that actually holds an OAuth access token, matching
     get_openai_credentials()'s last-one-wins read order.
     """
     found = None
-    for auth_path in CODEX_AUTH_PATHS:
+    for auth_path in ([path] if path is not None else CODEX_AUTH_PATHS):
         if not auth_path.exists():
             continue
         try:
@@ -880,7 +897,7 @@ def ensure_codex_credentials(force: bool = False) -> dict:
         if not acquired:
             return creds
 
-        found = _read_codex_auth_file()
+        found = _read_codex_auth_file(auth_path)
         if not found:
             return creds
         auth_path, auth, tokens = found
@@ -905,28 +922,25 @@ def ensure_codex_credentials(force: bool = False) -> dict:
         if isinstance(claims, dict) and isinstance(claims.get("client_id"), str):
             client_id = claims["client_id"]
 
-        new_tokens = refresh_codex_token(refresh_token, client_id)
-        if not new_tokens:
-            return _codex_creds_from_tokens(creds, tokens)
-
-        tokens["access_token"] = new_tokens["access_token"]
-        if new_tokens.get("id_token"):
-            tokens["id_token"] = new_tokens["id_token"]
-            # codex derives the account id from the id_token; keep them in sync.
-            id_claims = jwt_claims(new_tokens["id_token"]) or {}
-            auth_claims = id_claims.get("https://api.openai.com/auth")
-            if isinstance(auth_claims, dict) and auth_claims.get("chatgpt_account_id"):
-                tokens["account_id"] = auth_claims["chatgpt_account_id"]
-        if new_tokens.get("refresh_token"):
-            tokens["refresh_token"] = new_tokens["refresh_token"]
-        # codex uses last_refresh to decide when to refresh next; stamping it
-        # keeps the CLI from immediately redoing the work we just did.
-        auth["last_refresh"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
         try:
-            write_json_secure(auth_path, auth)
+            with staged_json_write(auth_path, auth) as commit:
+                new_tokens = refresh_codex_token(refresh_token, client_id)
+                if not new_tokens:
+                    return _codex_creds_from_tokens(creds, tokens)
+
+                tokens["access_token"] = new_tokens["access_token"]
+                if new_tokens.get("id_token"):
+                    tokens["id_token"] = new_tokens["id_token"]
+                    id_claims = jwt_claims(new_tokens["id_token"]) or {}
+                    auth_claims = id_claims.get("https://api.openai.com/auth")
+                    if isinstance(auth_claims, dict) and auth_claims.get("chatgpt_account_id"):
+                        tokens["account_id"] = auth_claims["chatgpt_account_id"]
+                if new_tokens.get("refresh_token"):
+                    tokens["refresh_token"] = new_tokens["refresh_token"]
+                auth["last_refresh"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                commit(auth)
         except (OSError, PermissionError, TypeError) as e:
-            print(f"Warning: Could not save refreshed Codex token: {e}", file=sys.stderr)
+            print(f"Warning: Could not refresh/save Codex token: {e}", file=sys.stderr)
 
         return _codex_creds_from_tokens(creds, tokens)
 
@@ -1032,6 +1046,8 @@ def get_codex_usage() -> dict:
         elif status == 401:
             result["token_status"] = "expired"
             result["hint_refresh"] = "Run 'codex login' to re-authenticate"
+        else:
+            return {"error": f"API error ({status})", "details": str(data)[:200]}
 
     # Fallback: Try basic API key validation
     if creds.get("api_key"):
@@ -1046,6 +1062,8 @@ def get_codex_usage() -> dict:
             result["note"] = "API key valid but no subscription quota API"
             result["hint"] = "Check usage at https://platform.openai.com/usage"
             return result
+        if not result:
+            return {"error": f"API error ({status})", "details": str(data)[:200]}
 
     if result:
         return result
@@ -1262,7 +1280,7 @@ def get_gemini_credentials() -> dict | None:
                             write_json_secure(oauth_path, oauth_data)
                         except Exception as e:
                             # Log warning but continue - in-memory token still works
-                            print(f"Warning: Could not save refreshed OAuth token: {e}")
+                            print(f"Warning: Could not save refreshed OAuth token: {e}", file=sys.stderr)
                             pass
         except:
             pass
@@ -1342,7 +1360,7 @@ def get_gemini_usage() -> dict:
 
         if status == 200 and isinstance(data, dict):
             result["auth"] = "OAuth (Google Account)"
-            result["status"] = "ok"
+            result["status"] = "authenticated"
 
             # Extract tier info
             if tier := data.get("currentTier", {}):
@@ -1350,6 +1368,9 @@ def get_gemini_usage() -> dict:
 
             # Get project ID for quota lookup
             project_id = data.get("cloudaicompanionProject")
+            if not project_id:
+                result["error"] = "Could not fetch usage"
+                result["note"] = "Quota project was not returned"
 
             if project_id:
                 # Step 2: Get quota via retrieveUserQuota API
@@ -1359,9 +1380,17 @@ def get_gemini_usage() -> dict:
                     {"project": project_id}
                 )
 
+                if quota_status == 401:
+                    result["token_status"] = "expired"
+                    result["hint_refresh"] = "Run 'gemini' to refresh token"
+                elif quota_status != 200:
+                    result["error"] = f"API error ({quota_status})"
+                else:
+                    result["error"] = "Could not fetch usage"
+
                 if quota_status == 200 and isinstance(quota_data, dict):
                     buckets = quota_data.get("buckets", [])
-                    if buckets:
+                    if isinstance(buckets, list) and buckets:
                         result["models"] = {}
                         for bucket in buckets:
                             model_id = bucket.get("modelId", "unknown")
@@ -1378,11 +1407,14 @@ def get_gemini_usage() -> dict:
                             }
                             if reset_time:
                                 result["models"][model_id]["resets_in"] = format_reset_time(reset_time)
+                        result.pop("error", None)
+                        result["status"] = "ok"
 
         elif status == 401:
             result["token_status"] = "expired"
             result["hint_refresh"] = "Run 'gemini' to refresh token"
         else:
+            result["error"] = f"API error ({status})"
             # Fallback: verify token with userinfo API
             status, data = http_get("https://www.googleapis.com/oauth2/v1/userinfo", headers)
             if status == 200 and isinstance(data, dict):
@@ -2912,15 +2944,10 @@ Example Output:
     results = None
     cache_age = None
     if use_cache:
-        cached = read_cache(cache_ttl)
+        cached = read_cache(cache_ttl, providers=requested or None)
         if cached is not None:
-            cached_data, age = cached
-            if check_all:
-                results, cache_age = cached_data, age
-            elif all(name in cached_data for name in requested):
-                # Honor provider filters on cache hits; refetch if any requested provider is missing
-                results = {name: cached_data[name] for name in requested}
-                cache_age = age
+            results, ages = cached
+            cache_age = max(ages.values())
 
     skip_fetch = results is not None
     if not skip_fetch:

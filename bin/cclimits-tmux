@@ -136,53 +136,66 @@ serve() {
 }
 
 is_transient_field() {
-  case $1 in
-    *❌*|*⏰*|*ERR*|*:expired) return 0 ;;
-    *) return 1 ;;
-  esac
+  local pattern=":[[:space:]]*($ANSI_SGR)*(❌|⏰|ERR|expired)($ANSI_SGR)*([[:space:]]|$)"
+  [[ $1 =~ $pattern ]]
 }
 
 is_prior_reading() {
-  case $1 in
-    *❌*|*⏰*|*ERR*|*:expired|*🔑*|*:no\ key) return 1 ;;
-    *) return 0 ;;
-  esac
+  local pattern=":[[:space:]]*($ANSI_SGR)*(🔑|no key)($ANSI_SGR)*([[:space:]]|$)"
+  ! is_transient_field "$1" && ! [[ $1 =~ $pattern ]]
 }
+
+# A separator is structural only before another Label:, not inside Gemini's
+# parenthesized tier list. Preserve the original delimiter and ANSI bytes.
+ANSI_SGR=$'\033''\[[0-9;]*m'
+FIELD_BOUNDARY='(_| \| )[^[:space:]:|_]+:'
 
 # Replace only failed provider fields with their matching prior readings. A
 # Claude outage must not freeze a fresh Grok value (or vice versa), while a
 # single-provider view retains the same last-good behavior as before.
 merge_last_good() {
   local fresh_file=$1 old_file=$2 output_file=$3
-  local fresh old fresh_rest old_rest field old_field label replacement merged=""
+  local fresh old fresh_rest old_rest field old_field label replacement merged="" boundary separator
 
   IFS= read -r fresh <"$fresh_file" || [ -n "$fresh" ]
   IFS= read -r old <"$old_file" || [ -n "$old" ]
   fresh_rest=$fresh
 
   while :; do
-    field=${fresh_rest%%_*}
+    field=$fresh_rest
+    separator=""
+    if [[ $fresh_rest =~ $FIELD_BOUNDARY ]]; then
+      boundary=${BASH_REMATCH[0]}
+      separator=${BASH_REMATCH[1]}
+      field=${fresh_rest%%"$boundary"*}
+      fresh_rest=${fresh_rest#"$field"}
+      fresh_rest=${fresh_rest#"$separator"}
+    fi
     replacement=$field
     if is_transient_field "$field"; then
       label=${field%%:*}
       old_rest=$old
       while :; do
-        old_field=${old_rest%%_*}
+        old_field=$old_rest
+        if [[ $old_rest =~ $FIELD_BOUNDARY ]]; then
+          boundary=${BASH_REMATCH[0]}
+          old_field=${old_rest%%"$boundary"*}
+          # Remove through this boundary, not through a Gemini tier separator.
+          old_rest=${old_rest#"$old_field"}
+          old_rest=${old_rest#"${BASH_REMATCH[1]}"}
+        else
+          old_rest=""
+        fi
         if [ "${old_field%%:*}" = "$label" ] && is_prior_reading "$old_field"; then
           replacement=$old_field
           break
         fi
-        [ "$old_rest" = "${old_rest#*_}" ] && break
-        old_rest=${old_rest#*_}
+        [ -z "$old_rest" ] && break
       done
     fi
 
-    if [ -n "$merged" ]; then
-      merged="${merged}_"
-    fi
-    merged="${merged}${replacement}"
-    [ "$fresh_rest" = "${fresh_rest#*_}" ] && break
-    fresh_rest=${fresh_rest#*_}
+    merged="${merged}${replacement}${separator}"
+    [ -z "$separator" ] && break
   done
 
   printf '%s\n' "$merged" >"$output_file"
@@ -219,7 +232,7 @@ if [ ! -f "$LEASE" ] || [ $(( $(date +%s) - $(stat -c %Y -- "$LEASE") )) -ge "$T
     # disable auto-refresh for icon users — the status line would sit on
     # `expired` until the next manual `grok` run, with nothing to indicate
     # that the recovery path had stopped firing.
-    if grep -qE "(Grok|$GROK_ICON):(expired|⏰)" -- "$CACHE.tmp" && command -v "$GROK_CMD" >/dev/null 2>&1; then
+    if grep -qE "(Grok|$GROK_ICON):[[:space:]]*($ANSI_SGR)*(expired|⏰)" -- "$CACHE.tmp" && command -v "$GROK_CMD" >/dev/null 2>&1; then
       if "$GROK_CMD" models >/dev/null 2>&1; then
         # shellcheck disable=SC2086
         "${CMD[@]}" $ARGS >"$CACHE.tmp" 2>/dev/null || true

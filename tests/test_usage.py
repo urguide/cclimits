@@ -28,7 +28,7 @@ from cclimits import (
 class TestGetClaudeUsage:
     """Tests for get_claude_usage() function."""
 
-    @patch('cclimits.get_claude_credentials')
+    @patch('cclimits.ensure_claude_token')
     @patch('cclimits.http_get')
     def test_successful_usage(self, mock_get, mock_creds):
         """Test successful Claude usage retrieval."""
@@ -56,7 +56,7 @@ class TestGetClaudeUsage:
         assert "27.7%" in result["seven_day"]["remaining"]
         assert result["opus"]["used"] == "30.0%"
 
-    @patch('cclimits.get_claude_credentials')
+    @patch('cclimits.ensure_claude_token')
     @patch('cclimits.http_get')
     def test_expired_token(self, mock_get, mock_creds):
         """Test handling expired token."""
@@ -68,7 +68,7 @@ class TestGetClaudeUsage:
         assert result["error"] == "Token expired"
         assert "re-authenticate" in result["hint"]
 
-    @patch('cclimits.get_claude_credentials')
+    @patch('cclimits.ensure_claude_token')
     def test_no_credentials(self, mock_creds):
         """Test when no credentials are found."""
         mock_creds.return_value = None
@@ -78,7 +78,7 @@ class TestGetClaudeUsage:
         assert result["error"] == "No credentials found"
         assert "authenticate first" in result["hint"]
 
-    @patch('cclimits.get_claude_credentials')
+    @patch('cclimits.ensure_claude_token')
     @patch('cclimits.http_get')
     def test_http_error(self, mock_get, mock_creds):
         """Test HTTP error response."""
@@ -90,7 +90,7 @@ class TestGetClaudeUsage:
         assert result["error"] == "HTTP 500"
         assert "Internal Server Error" in result["details"][:50]
 
-    @patch('cclimits.get_claude_credentials')
+    @patch('cclimits.ensure_claude_token')
     @patch('cclimits.http_get')
     def test_partial_data(self, mock_get, mock_creds):
         """Test when only partial data is returned."""
@@ -252,6 +252,23 @@ class TestGetCodexUsage:
         assert result["token_status"] == "expired"
         assert "re-authenticate" in result["hint_refresh"]
 
+    @pytest.mark.parametrize("status", [0, 429, 500, 503])
+    def test_outage_is_not_an_authentication_failure(self, status):
+        with patch('cclimits.ensure_codex_credentials', return_value={
+            "access_token": "fake", "account_id": "fake", "api_key": "fake-key",
+        }), patch('cclimits.http_get', return_value=(status, "upstream unavailable")):
+            result = get_codex_usage()
+        assert result["error"] == f"API error ({status})"
+        assert _is_transient_error(result)
+
+    def test_forbidden_is_not_transient(self):
+        with patch('cclimits.ensure_codex_credentials', return_value={
+            "access_token": "fake", "account_id": "fake",
+        }), patch('cclimits.http_get', return_value=(403, "forbidden")):
+            result = get_codex_usage()
+        assert not _is_transient_error(result)
+        assert "403" in result["error"]
+
 
 class TestGetGeminiUsage:
     """Tests for get_gemini_usage() function."""
@@ -317,6 +334,36 @@ class TestGetGeminiUsage:
 
         assert result["error"] == "No credentials found"
         assert "GEMINI_API_KEY" in result["hint"]
+
+    @pytest.mark.parametrize("status", [0, 401, 403, 429, 503])
+    @pytest.mark.parametrize("stage", ["load", "quota"])
+    def test_api_failure_is_visible_and_classified(self, status, stage, capsys):
+        import cclimits
+        responses = [(status, "unavailable")]
+        if stage == "quota":
+            responses.insert(0, (200, {"cloudaicompanionProject": "fake"}))
+        with patch('cclimits.get_gemini_credentials', return_value={"access_token": "fake"}), \
+                patch('cclimits.http_post', side_effect=responses), \
+                patch('cclimits.http_get', return_value=(200, {"email": "fake@example.com"})):
+            result = get_gemini_usage()
+        assert result.get("status") != "ok"
+        assert "error" in result or result.get("token_status") == "expired"
+        assert _is_transient_error(result) == (status not in (401, 403))
+        assert not cclimits._is_good_cache_entry(result)
+        cclimits.print_oneline({"gemini": result}, compact=True)
+        assert capsys.readouterr().out.strip() in ("Gemini:ERR", "Gemini:expired")
+
+    @pytest.mark.parametrize("quota", [{}, {"buckets": []}, "not json"])
+    def test_missing_quota_does_not_replace_good_cache(self, quota):
+        import cclimits
+        previous = {"status": "ok", "models": {"gemini-2.5-flash": {"used": "20%"}}}
+        with patch('cclimits.get_gemini_credentials', return_value={"access_token": "fake"}), \
+                patch('cclimits.http_post', side_effect=[
+                    (200, {"cloudaicompanionProject": "fake"}), (200, quota),
+                ]):
+            result = get_gemini_usage()
+        assert "error" in result
+        assert cclimits.merge_cache_data({"gemini": previous}, {"gemini": result})["gemini"] == previous
 
 
 class TestGetAntigravityUsage:

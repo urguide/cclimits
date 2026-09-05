@@ -160,7 +160,8 @@ class TestGetGeminiOAuthCreds:
         assert creds == ("test-client-id", "test-client-secret")
 
     @patch('cclimits.os.environ.get')
-    def test_partial_env_creds(self, mock_get):
+    @patch('cclimits._extract_oauth_from_file', return_value=None)
+    def test_partial_env_creds(self, mock_extract, mock_get):
         """Test partial environment credentials (should return None)."""
         def get_side_effect(key):
             if key == "GEMINI_OAUTH_CLIENT_ID":
@@ -368,7 +369,19 @@ class TestWriteJsonSecure:
 
         assert json.loads(target.read_text()) == {"a": 1}
         assert stat.S_IMODE(target.stat().st_mode) == 0o600
-        assert not (tmp_path / "creds.json.tmp").exists()
+        assert not list(tmp_path.glob("*.tmp"))
+
+    def test_does_not_follow_old_predictable_temp_symlink(self, tmp_path):
+        target = tmp_path / "creds.json"
+        unrelated = tmp_path / "unrelated"
+        unrelated.write_text("untouched")
+        (tmp_path / "creds.json.tmp").symlink_to(unrelated)
+
+        write_json_secure(target, {"token": "fake"})
+
+        assert unrelated.read_text() == "untouched"
+        assert json.loads(target.read_text()) == {"token": "fake"}
+        assert (tmp_path / "creds.json.tmp").is_symlink()
 
     def test_tightens_permissions_on_existing_loose_file(self, tmp_path):
         target = tmp_path / "creds.json"
@@ -559,6 +572,56 @@ class TestEnsureClaudeToken:
             assert ensure_claude_token() is None
         mock_post.assert_not_called()
 
+    @pytest.mark.parametrize("force", [False, True])
+    @pytest.mark.parametrize("keychain_token", ["keychain-account-a", "old-access"])
+    def test_keychain_source_is_never_refreshed_via_file(
+            self, claude_creds, monkeypatch, force, keychain_token):
+        path = claude_creds(expiresAt=1)
+        before = path.read_text()
+        monkeypatch.setattr(cclimits.sys, "platform", "darwin")
+        cclimits.subprocess.run.return_value = MagicMock(
+            returncode=0, stdout=json.dumps({"accessToken": keychain_token}),
+        )
+        with patch('cclimits.http_post', return_value=(400, {})) as post:
+            assert ensure_claude_token(force=force) == keychain_token
+        post.assert_not_called()
+        assert path.read_text() == before
+
+    @pytest.mark.parametrize("blocked", ["cclimits.os.open", "cclimits.os.mkdir",
+                                         "tempfile.mkstemp", "cclimits.os.fsync"])
+    def test_refresh_requires_locks_and_writable_staging(self, claude_creds, blocked):
+        path = claude_creds(expiresAt=1)
+        before = path.read_text()
+        with patch(blocked, side_effect=OSError("unwritable")), \
+                patch('cclimits.http_post', return_value=(400, {})) as post:
+            assert ensure_claude_token() == "old-access"
+        post.assert_not_called()
+        assert path.read_text() == before
+        assert not list(path.parent.glob("*.tmp"))
+
+    def test_rotation_survives_failed_final_rename(self, claude_creds, capsys):
+        path = claude_creds(expiresAt=1)
+        with patch('cclimits.http_post', return_value=(200, {
+            "access_token": "new-access", "refresh_token": "new-refresh",
+        })), patch('cclimits.os.replace', side_effect=OSError("rename denied")):
+            assert ensure_claude_token() == "new-access"
+        staged = list(path.parent.glob("*.tmp"))
+        assert len(staged) == 1
+        assert json.loads(staged[0].read_text())["claudeAiOauth"]["refreshToken"] == "new-refresh"
+        assert stat.S_IMODE(staged[0].stat().st_mode) == 0o600
+        assert str(staged[0]) in capsys.readouterr().err
+
+    def test_rotation_survives_failed_final_fsync(self, claude_creds, capsys):
+        path = claude_creds(expiresAt=1)
+        with patch('cclimits.http_post', return_value=(200, {
+            "access_token": "new-access", "refresh_token": "new-refresh",
+        })), patch('cclimits.os.fsync', side_effect=[None, OSError("sync failed")]):
+            assert ensure_claude_token() == "new-access"
+        staged = list(path.parent.glob("*.tmp"))
+        assert len(staged) == 1
+        assert json.loads(staged[0].read_text())["claudeAiOauth"]["refreshToken"] == "new-refresh"
+        assert str(staged[0]) in capsys.readouterr().err
+
 
 @pytest.fixture
 def codex_auth(tmp_path, monkeypatch):
@@ -669,3 +732,22 @@ class TestEnsureCodexCredentials:
             creds = ensure_codex_credentials(force=True)
 
         assert creds["access_token"] == "forced-access"
+
+    @pytest.mark.parametrize("blocked", ["cclimits.os.open", "tempfile.mkstemp",
+                                         "cclimits.os.fsync"])
+    def test_refresh_requires_lock_and_writable_staging(self, codex_auth, blocked):
+        path = codex_auth(exp_offset=-60)
+        before = path.read_text()
+        with patch(blocked, side_effect=OSError("unwritable")), \
+                patch('cclimits.http_post', return_value=(400, {})) as post:
+            result = ensure_codex_credentials()
+        post.assert_not_called()
+        assert result["access_token"] == json.loads(before)["tokens"]["access_token"]
+        assert path.read_text() == before
+        assert not list(path.parent.glob("*.tmp"))
+
+
+def test_missing_lock_backend_fails_closed(tmp_path):
+    with patch.dict('sys.modules', {"fcntl": None}):
+        with cclimits.credential_lock(tmp_path / "auth.json") as acquired:
+            assert acquired is False

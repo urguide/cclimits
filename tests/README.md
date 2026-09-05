@@ -1,91 +1,53 @@
 # Test Suite for cclimits
 
-This directory contains comprehensive unit tests for the cclimits Python CLI tool.
-
-## Test Structure
-
-```
-tests/
-├── conftest.py          # Shared fixtures and mock data
-├── test_utils.py        # Pure function tests (20 tests)
-├── test_http.py         # HTTP client tests (18 tests)
-├── test_credentials.py  # Credential discovery tests (17 tests)
-├── test_usage.py        # API usage tests (18 tests)
-├── test_output.py       # Output formatting tests (26 tests)
-└── test_cli.py          # CLI integration tests (23 tests)
-```
-
-**Total: 122 tests**
-
 ## Running Tests
 
 ```bash
-# Run all tests
-python -m pytest tests/ -v
-
-# Run specific test file
-python -m pytest tests/test_utils.py -v
-
-# Run with short traceback
-python -m pytest tests/ -v --tb=short
-
-# Run tests quietly (summary only)
-python -m pytest tests/ -q
-
-# Show coverage
-python -m pytest tests/ --cov=lib --cov-report=term-missing
+python3 -m pip install -r requirements-dev.txt
+python3 -m pytest tests/ -q
+python3 -m pytest tests/test_credentials.py -v
+python3 -m pytest tests/ --collect-only -q
 ```
 
-## Test Coverage
+For a genuine zero-requests environment, use a separate virtual environment:
 
-### test_utils.py (20 tests)
-- `format_reset_time()` - ISO timestamp formatting
-- `get_status_icon()` - Usage percentage to emoji mapping
+```bash
+python3 -m venv /tmp/cclimits-urllib-tests
+/tmp/cclimits-urllib-tests/bin/python -m pip install pytest
+/tmp/cclimits-urllib-tests/bin/python -m pytest tests/ -k "not WithRequests" -q
+```
 
-### test_http.py (18 tests)
-- `http_get()` - GET requests with both requests and urllib
-- `http_post()` - POST requests with both requests and urllib
-- Success, error, and timeout scenarios
+The nine `WithRequests` cases require the optional library. CI tests both
+backends on Python 3.9, 3.11, and 3.13. Use collection output for current test
+counts rather than maintaining duplicate counts here.
 
-### test_credentials.py (17 tests)
-- `get_claude_credentials()` - macOS Keychain, config files, env vars
-- `get_openai_credentials()` - auth.json, env vars
-- `get_gemini_credentials()` - OAuth, API key, gcloud
-- `get_zai_credentials()` - Various env var names
+## Coverage
 
-### test_usage.py (18 tests)
-- `get_claude_usage()` - API responses, errors, partial data
-- `get_codex_usage()` - OAuth flow, API key fallback
-- `get_gemini_usage()` - OAuth flow, token refresh, quotas
-- `get_zai_usage()` - Quota endpoints, historical data
+| File | Scope |
+|------|-------|
+| `test_isolation.py` | Empty default credentials and isolated discovery paths |
+| `test_credentials.py` | Discovery, source selection, refresh locks, write-back, recovery data |
+| `test_http.py` | requests and urllib request/response behavior |
+| `test_usage.py` | Mocked provider quotas, HTTP failures, reset windows |
+| `test_utils.py` | Cache ages, concurrent writes, stale eligibility, time formatting |
+| `test_output.py` | Detailed/oneline output, compact mode, icons and reset placeholders |
+| `test_cli.py` | Flags, JSON contract, cache selection, repeated outages and parallel fetches |
+| `test_tmux_wrapper.py` | Fake-executable end-to-end tests for watch mode and per-provider merging |
 
-### test_output.py (26 tests)
-- `print_section()` - Detailed output formatting
-- `print_oneline()` - Compact output formatting
-- Various data combinations and edge cases
+## Isolation Rules
 
-### test_cli.py (23 tests)
-- Argument parsing (`--json`, `--oneline`, `--claude`, etc.)
-- Single-tool flags
-- Multiple-tool combinations
-- Output format selection
+- `conftest.py` redirects HOME, cache paths, and import-time credential paths to
+  temporary directories, clears provider/cclimits environment overrides, and
+  stubs the application's external credential-discovery commands.
+- Network access is blocked at requests, urllib, and socket boundaries. An
+  attempted unmocked request fails the test, including at teardown if swallowed.
+- Mock a provider's HTTP or credential boundary explicitly. Claude usage tests
+  patch `ensure_claude_token`; refresh tests use real temporary credential files
+  and mock only the token endpoint.
+- Wrapper tests override TMPDIR, cclimits, and Grok paths. Never launch a real
+  provider CLI from tests; fake executables simulate state transitions.
+- Time-sensitive regressions should freeze the clock. Test consecutive cache
+  reads/writes, not just a single stale-fallback call.
 
-## Current Status
-
-**96 of 122 tests passing (78.7%)**
-
-The test suite provides comprehensive coverage of all major functions. Some urllib-related tests have minor issues due to context manager mocking complexity, but the core functionality is well-tested.
-
-## Known Issues
-
-- Some urllib fallback tests fail due to context manager mocking challenges
-- A few edge case tests for oneline output with invalid windows
-- These don't affect the actual functionality, only test infrastructure
-
-## Best Practices
-
-1. Tests are fast and don't require network access
-2. External dependencies are mocked using `unittest.mock`
-3. Tests use pytest fixtures for shared data
-4. Each test is independent and can run in any order
-5. Clear test names describe what is being tested
+Tests do not validate live provider schemas or real macOS Keychain behavior.
+Run live account checks separately and intentionally, never as part of pytest.

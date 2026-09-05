@@ -191,6 +191,25 @@ class TestJSONOutput:
         assert result["claude"]["error"] == "No credentials"
         assert "hint" in result["claude"]
 
+    def test_gemini_write_warning_goes_to_stderr(self, capsys):
+        from pathlib import Path
+        path = Path.home() / ".gemini" / "oauth_creds.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({
+            "access_token": "fake-old", "refresh_token": "fake-refresh", "expiry_date": 1,
+        }))
+        with patch('sys.argv', ["cclimits", "--gemini", "--json"]), \
+                patch('cclimits.refresh_gemini_token', return_value={"access_token": "fake-new"}), \
+                patch('cclimits.write_json_secure', side_effect=OSError("write denied")), \
+                patch('cclimits.http_post', side_effect=[
+                    (200, {"cloudaicompanionProject": "fake"}),
+                    (200, {"buckets": [{"modelId": "gemini-2.5-flash", "remainingFraction": 1}]}),
+                ]):
+            main()
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)["gemini"]["status"] == "ok"
+        assert "Could not save refreshed OAuth token" in captured.err
+
 
 class TestOnelineOutput:
     """Tests for oneline output mode."""
@@ -707,12 +726,9 @@ class TestStaleCacheFallback:
 
     def _write_cache_with_age(self, data, age_seconds):
         """Write a cache file with a timestamp *age_seconds* in the past."""
-        import json, time
-        from cclimits import get_cache_path
-        get_cache_path().write_text(json.dumps({
-            "timestamp": time.time() - age_seconds,
-            "data": data,
-        }))
+        import cclimits
+        with patch('cclimits.time.time', return_value=time.time() - age_seconds):
+            assert cclimits.write_cache(data)
 
     @patch('cclimits.get_zai_usage')
     @patch('sys.argv', ['cclimits', '--zai', '--oneline'])
@@ -835,3 +851,33 @@ class TestStaleCacheFallback:
         captured = capsys.readouterr()
         assert "Stale fallback" in captured.out
         assert "30m" in captured.out
+
+    @pytest.mark.parametrize("cached", [False, True])
+    def test_expired_entry_cannot_be_revived_by_failed_fetch(self, cached, capsys):
+        import cclimits
+        self._write_cache_with_age(
+            {"zai": {"status": "ok", "token_quota": {"percentage": 7}}}, 90000,
+        )
+        args = ["cclimits", "--zai", "--json"] + (["--cached"] if cached else [])
+        with patch('sys.argv', args), patch('cclimits.get_zai_usage', return_value={
+            "error": "API error (503)",
+        }):
+            for _ in range(3):
+                main()
+                assert json.loads(capsys.readouterr().out)["zai"]["error"] == "API error (503)"
+
+    def test_each_provider_keeps_its_own_stale_age(self, capsys):
+        import cclimits
+        with patch('cclimits.time.time', return_value=1000):
+            assert cclimits.write_cache({"claude": {"status": "ok", "five_hour": {"used": "10%"}}})
+        with patch('cclimits.time.time', return_value=2000):
+            assert cclimits.write_cache({"zai": {"status": "ok", "token_quota": {"percentage": 7}}})
+        with patch('cclimits.time.time', return_value=3000), \
+                patch('sys.argv', ["cclimits", "--claude", "--zai", "--json"]), \
+                patch('cclimits.get_claude_usage', return_value={"error": "HTTP 503"}), \
+                patch('cclimits.get_zai_usage', return_value={"error": "HTTP 503"}):
+            for _ in range(2):
+                main()
+                result = json.loads(capsys.readouterr().out)
+                assert result["claude"]["stale_age_seconds"] == 2000
+                assert result["zai"]["stale_age_seconds"] == 1000

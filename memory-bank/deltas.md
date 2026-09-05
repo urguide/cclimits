@@ -1,5 +1,15 @@
 # Recent Deltas (Last 3-5 Changes)
 
+## 2026-09-05: Review Fixes for Credential Safety and Cache Correctness
+
+- Isolated HOME, all import-time credential paths and provider environment variables in pytest. Stubbed credential-discovery commands; blocked unmocked requests/urllib/socket connections. Every wrapper test now uses a fake or nonexistent Grok executable, including watch/corruption helpers.
+- Claude/Codex locks fail closed on missing backends or filesystem errors. Unique 0600 staging files are written and synced before rotating a token. Failed final writes retain recovery data and report the private path on stderr. Claude selections retain their source, so Keychain tokens cannot switch to a different disk-backed account; locked re-reads stay pinned to the selected path.
+- Cache version 2 stores each provider's timestamp with its data. Partial runs and transient failures preserve original ages; 25-hour-old values cannot be revived by a failed write cycle. Read/merge/write is locked and uses unique temp files. Old global-timestamp caches are deliberately invalidated, since their retained entries' ages cannot be recovered.
+- Codex connection/429/5xx failures no longer become authentication errors; Gemini load/quota failures stay visible and cannot overwrite good cached quota as successful authentication. Gemini write warnings use stderr, preserving `--json`.
+- tmux last-good merging recognizes both `_` and provider-level ` | ` boundaries, preserving Gemini's inner tier separators, ANSI colors and icons. Numeric exhausted-quota readings are not transient failures. Grok delegation also recognizes normal and colored expired output.
+- Regression cases were run against the pre-fix behavior first for OAuth, cache, API errors/JSON and wrapper merging, then verified after fixes. No real credentials or provider APIs were used. System-wide installation is blocked by sudo requiring a password; no watchers were restarted.
+- Verification: Python 3.14 local suite **383 passed**; separate venv with requests absent **374 passed, 9 deselected** (the requests-only cases). Bash/Node syntax checks, Node wrapper `--help`, and `git diff --check` passed. The existing CI matrix remains responsible for Python 3.9/3.11/3.13.
+
 ## 2026-08-30: One Expired Provider Froze Every tmux Reading
 
 - **Symptom**: Grok's live billing API had rolled into a new weekly period and returned `0%`, but tmux remained at `22%(8h)` because Claude was expired in the same status line.

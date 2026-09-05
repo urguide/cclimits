@@ -3,6 +3,12 @@ Tests for pure utility functions (no mocking required).
 """
 
 import pytest
+import json
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from unittest.mock import patch
+import cclimits
 from datetime import datetime, timedelta, timezone
 from cclimits import format_reset_time, get_status_icon
 
@@ -209,14 +215,15 @@ class TestReadCacheReturnsAge:
         assert write_cache({"zai": {"status": "ok"}})
         cached = read_cache(60)
         assert cached is not None
-        data, age = cached
+        data, ages = cached
         assert data["zai"]["status"] == "ok"
-        assert isinstance(age, int) and 0 <= age < 60
+        assert isinstance(ages["zai"], int) and 0 <= ages["zai"] < 60
 
     def test_stale_cache_returns_none(self):
         import json, time
-        from cclimits import read_cache, get_cache_path
-        get_cache_path().write_text(json.dumps({"timestamp": time.time() - 120, "data": {}}))
+        from cclimits import read_cache, write_cache
+        with patch('cclimits.time.time', return_value=time.time() - 120):
+            write_cache({"zai": {"status": "ok"}})
         assert read_cache(60) is None
 
 
@@ -229,6 +236,26 @@ class TestAtomicCacheWrite:
         cache_file = get_cache_path()
         assert cache_file.exists()
         assert not cache_file.with_suffix(".json.tmp").exists()
+
+    def test_concurrent_writers_preserve_every_update(self):
+        barrier = Barrier(8)
+
+        def write(index):
+            barrier.wait(timeout=5)
+            return cclimits.write_cache({str(index): {"status": "ok", "value": "x" * 10000}})
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            assert all(executor.map(write, range(8)))
+        data, _ = cclimits.read_cache(60)
+        assert set(data) == {str(i) for i in range(8)}
+        assert not list(cclimits.CACHE_DIR.glob("*.tmp"))
+
+    def test_lock_failure_leaves_cache_untouched(self):
+        assert cclimits.write_cache({"zai": {"status": "ok"}})
+        before = cclimits.CACHE_FILE.read_text()
+        with patch('cclimits.os.open', side_effect=PermissionError("denied")):
+            assert not cclimits.write_cache({"codex": {"status": "ok"}})
+        assert cclimits.CACHE_FILE.read_text() == before
 
 
 class TestIsTransientError:
@@ -298,7 +325,7 @@ class TestApplyStaleFallback:
         from cclimits import apply_stale_fallback
         results = {"zai": {"error": "API error (500)"}}
         cached = {"zai": {"status": "ok", "token_quota": {"percentage": 30}}}
-        updated = apply_stale_fallback(results, cached, cached_age=120)
+        updated = apply_stale_fallback(results, cached, cached_age={"zai": 120})
         assert updated["zai"]["status"] == "ok"
         assert updated["zai"]["stale_fallback"] is True
         assert updated["zai"]["stale_age_seconds"] == 120
@@ -307,7 +334,7 @@ class TestApplyStaleFallback:
         from cclimits import apply_stale_fallback
         results = {"zai": {"error": "No credentials found"}}
         cached = {"zai": {"status": "ok", "token_quota": {"percentage": 30}}}
-        updated = apply_stale_fallback(results, cached, cached_age=60)
+        updated = apply_stale_fallback(results, cached, cached_age={"zai": 60})
         assert updated["zai"]["error"] == "No credentials found"
         assert "stale_fallback" not in updated["zai"]
 
@@ -315,7 +342,7 @@ class TestApplyStaleFallback:
         from cclimits import apply_stale_fallback
         results = {"codex": {"token_status": "expired"}}
         cached = {"codex": {"status": "ok", "primary_window": {"used": "10%"}}}
-        updated = apply_stale_fallback(results, cached, cached_age=60)
+        updated = apply_stale_fallback(results, cached, cached_age={"codex": 60})
         assert updated["codex"]["token_status"] == "expired"
         assert "stale_fallback" not in updated["codex"]
 
@@ -323,7 +350,7 @@ class TestApplyStaleFallback:
         from cclimits import apply_stale_fallback
         results = {"openrouter": {"error": "Invalid API key"}}
         cached = {"openrouter": {"status": "ok", "balance_usd": 10.0}}
-        updated = apply_stale_fallback(results, cached, cached_age=60)
+        updated = apply_stale_fallback(results, cached, cached_age={"openrouter": 60})
         assert updated["openrouter"]["error"] == "Invalid API key"
         assert "stale_fallback" not in updated["openrouter"]
 
@@ -331,28 +358,28 @@ class TestApplyStaleFallback:
         from cclimits import apply_stale_fallback
         results = {"zai": {"error": "API error (500)"}}
         cached = {"claude": {"status": "ok"}}
-        updated = apply_stale_fallback(results, cached, cached_age=60)
+        updated = apply_stale_fallback(results, cached, cached_age={"claude": 60})
         assert updated["zai"]["error"] == "API error (500)"
 
     def test_cached_entry_not_good_not_replaced(self):
         from cclimits import apply_stale_fallback
         results = {"zai": {"error": "API error (500)"}}
         cached = {"zai": {"error": "Could not fetch usage"}}
-        updated = apply_stale_fallback(results, cached, cached_age=60)
+        updated = apply_stale_fallback(results, cached, cached_age={"zai": 60})
         assert updated["zai"]["error"] == "API error (500)"
 
     def test_older_than_cap_not_replaced(self):
         from cclimits import apply_stale_fallback, STALE_CACHE_MAX_AGE
         results = {"zai": {"error": "API error (500)"}}
         cached = {"zai": {"status": "ok", "token_quota": {"percentage": 30}}}
-        updated = apply_stale_fallback(results, cached, cached_age=STALE_CACHE_MAX_AGE)
+        updated = apply_stale_fallback(results, cached, cached_age={"zai": STALE_CACHE_MAX_AGE})
         assert updated["zai"]["error"] == "API error (500)"
 
     def test_successful_entry_not_replaced(self):
         from cclimits import apply_stale_fallback
         results = {"zai": {"status": "ok", "token_quota": {"percentage": 50}}}
         cached = {"zai": {"status": "ok", "token_quota": {"percentage": 30}}}
-        updated = apply_stale_fallback(results, cached, cached_age=60)
+        updated = apply_stale_fallback(results, cached, cached_age={"zai": 60})
         assert updated["zai"]["token_quota"]["percentage"] == 50
         assert "stale_fallback" not in updated["zai"]
 
@@ -368,7 +395,7 @@ class TestApplyStaleFallback:
             "claude": {"status": "ok", "five_hour": {"used": "45%"}},
             "codex": {"status": "ok", "primary_window": {"used": "99%"}},
         }
-        updated = apply_stale_fallback(results, cached, cached_age=300)
+        updated = apply_stale_fallback(results, cached, cached_age={key: 300 for key in cached})
         assert updated["zai"]["stale_fallback"] is True
         assert updated["zai"]["stale_age_seconds"] == 300
         assert updated["claude"]["error"] == "No credentials found"
@@ -380,34 +407,62 @@ class TestReadCacheMaxAge:
 
     def test_stale_within_max_age_returned(self):
         import json, time
-        from cclimits import read_cache, get_cache_path
-        get_cache_path().write_text(json.dumps({
-            "timestamp": time.time() - 120,
-            "data": {"zai": {"status": "ok"}},
-        }))
+        from cclimits import read_cache, write_cache
+        with patch('cclimits.time.time', return_value=time.time() - 120):
+            write_cache({"zai": {"status": "ok"}})
         # ttl=60 would normally miss, but max_age=300 allows it
         cached = read_cache(60, max_age=300)
         assert cached is not None
-        data, age = cached
+        data, ages = cached
         assert data["zai"]["status"] == "ok"
-        assert 100 <= age <= 130
+        assert 100 <= ages["zai"] <= 130
 
     def test_stale_beyond_max_age_returns_none(self):
         import json, time
-        from cclimits import read_cache, get_cache_path
-        get_cache_path().write_text(json.dumps({
-            "timestamp": time.time() - 600,
-            "data": {"zai": {"status": "ok"}},
-        }))
+        from cclimits import read_cache, write_cache
+        with patch('cclimits.time.time', return_value=time.time() - 600):
+            write_cache({"zai": {"status": "ok"}})
         assert read_cache(60, max_age=300) is None
 
     def test_max_age_none_uses_ttl(self):
         import json, time
-        from cclimits import read_cache, get_cache_path
-        get_cache_path().write_text(json.dumps({
-            "timestamp": time.time() - 120,
-            "data": {"zai": {"status": "ok"}},
-        }))
+        from cclimits import read_cache, write_cache
+        with patch('cclimits.time.time', return_value=time.time() - 120):
+            write_cache({"zai": {"status": "ok"}})
         # max_age=None: ttl=60 is the bound, 120 > 60 -> None
         assert read_cache(60) is None
         assert read_cache(60, max_age=None) is None
+
+    def test_partial_refresh_preserves_other_providers_age(self):
+        with patch('cclimits.time.time', return_value=1000):
+            cclimits.write_cache({"claude": {"status": "ok"}})
+        with patch('cclimits.time.time', return_value=1100):
+            cclimits.write_cache({"codex": {"status": "ok"}})
+            assert cclimits.read_cache(60) is None
+            assert cclimits.read_cache(60, providers=["codex"])[1] == {"codex": 0}
+            assert cclimits.read_cache(60, max_age=150)[1] == {"claude": 100, "codex": 0}
+
+    @pytest.mark.parametrize("error", ["HTTP 503", "No credentials found"])
+    def test_preserved_values_do_not_receive_new_timestamp(self, error):
+        with patch('cclimits.time.time', return_value=1000):
+            cclimits.write_cache({"claude": {"status": "ok"}})
+        with patch('cclimits.time.time', return_value=1100):
+            cclimits.write_cache({"claude": {"error": error}})
+            assert cclimits.read_cache(60) is None
+            assert cclimits.read_cache(60, max_age=150)[1] == {"claude": 100}
+
+    def test_legacy_cache_is_invalidated_not_rejuvenated(self):
+        cclimits.get_cache_path().write_text(json.dumps({
+            "timestamp": time.time(), "data": {"claude": {"status": "ok"}},
+        }))
+        assert cclimits.read_cache(60) is None
+        cclimits.write_cache({"codex": {"status": "ok"}})
+        assert "claude" not in cclimits.read_cache(60)[0]
+
+    @pytest.mark.parametrize("entry", [None, {}, {"timestamp": "bad", "data": {}},
+                                        {"timestamp": float("nan"), "data": {}},
+                                        {"timestamp": 1e30, "data": {}},
+                                        {"timestamp": 1, "data": []}])
+    def test_malformed_entry_is_a_cache_miss(self, entry):
+        cclimits.get_cache_path().write_text(json.dumps({"version": 2, "entries": {"claude": entry}}))
+        assert cclimits.read_cache(60) is None

@@ -15,7 +15,8 @@
 - **Time windows**: 5h and 7d for Claude/Codex (Codex windows classified by `limit_window_seconds`, not slot position — weekly-only accounts return one window in the primary slot; renderer degrades gracefully to whichever window exists), 5h for Z.AI (shared across GLM models; `both` mode shows tokens%/monthly-MCP%, `--resets` there shows both countdowns), 5h rolling + weekly credits for Synthetic.new
 - **Reset countdowns** (`--resets`, alias `--timeremaining`): appends `↻` countdowns per provider in oneline; Grok uses its server-supplied weekly/monthly credit-period end, Antigravity shows its earliest model reset, and prepaid-balance providers have nothing to reset. In a *dual*-window suffix an absent/`N/A` countdown renders as `-` (`↻-/21h50m`, compact `(-/22h)`) so slot position still identifies the window — Claude reports `resets_at: null` whenever its 5h window is idle, which previously collapsed to a bare `(14h)` that could have been either window. When *every* slot is absent the suffix is dropped entirely, which is what keeps single-window providers (Grok, Antigravity, Gemini, weekly-only Codex) printing their `(7d)`/`(5h)` label instead of a useless `(-)`
 - **tmux wrapper resilience**: `--watch` is a long-running `#()` producer that emits a complete cached line every 2s, avoiding tmux 3.7b's blank interval when short-lived jobs restart; on a cold cache it emits `CCLIMITS_TMUX_PLACEHOLDER` (default `cclimits...`) so tmux never falls back to its own `<'...' not ready>` marker, and on a *failed* self-invocation it emits the distinct `CCLIMITS_TMUX_ERROR` (default `cclimits!`) — a live loop survives its own file being truncated/overwritten, so sharing one marker made a corrupt install look like a slow first lookup. Argument-keyed caches also feed a stable last-known-good display cache. *Transient* failures (`ERR`/`expired`) preserve only that provider's prior good field while healthy providers from the same refresh still advance; `no key` is accepted normally and replaces an old reading when a provider is deliberately left unconfigured. Expired Grok triggers one background `grok models`, delegating rotation/write-back to the official CLI without inference — that trigger matches both the `Grok` label and its `--icons` glyph, since matching only the word would silently disable auto-refresh for icon users. `CCLIMITS_TMUX_SEP` restyles `--compact`'s `_` provider separator (e.g. a coloured `┃` matching the pane dividers); the substitution runs on *serve*, never on write, so the cache keeps the raw form used for provider-level last-good merging and a separator change lands on the next redraw instead of after the TTL
-- **Caching** (`--cached`, `~/.cache/cclimits/usage.json`): atomic writes (temp + rename), merge on write (no-creds/partial runs preserve prior good entries), provider filters honored on cache hits (refetch if a requested provider is missing), output labeled with cache age
+- **Caching** (`--cached`, `~/.cache/cclimits/usage.json`): version 2 per-provider timestamps; locked read/merge/write with unique 0600 temp files. Partial runs and preserved readings never renew old timestamps; TTL/stale limits are checked per provider. Legacy global-timestamp caches are invalidated on upgrade.
+- **Review hardening (2026-09-05)**: OAuth locks fail closed, file staging precedes rotation, and Claude refresh is bound to the selected credential source. Codex preserves HTTP outage status; Gemini quota failures remain errors even when authentication succeeds. Gemini write warnings go to stderr. tmux provider merging handles compact, normal, icon, and ANSI output without splitting Gemini's tiers or rejecting numeric 100% readings.
 - **BYOK Support**: Explicit documentation for monitoring Aider/Continue via their underlying provider keys.
 
 ## Current Status
@@ -30,11 +31,13 @@
 - ✅ Providers fetched concurrently; cache hits skip all network/credential calls; transient failures fall back to <24h-old cached data with stale marker (v1.3.0)
 - ✅ Data-driven `PROVIDERS` registry — adding a provider is one registry entry + one fetch function
 - ✅ Claude/Codex OAuth tokens self-heal: expiry- and 401-driven refresh, atomic 0600 write-back to the vendor's own credential file, `flock`-serialized plus interop with Claude Code's own `.oauth_refresh.lock`, opt-out via `CCLIMITS_NO_TOKEN_REFRESH=1`
-- ✅ CI (GitHub Actions matrix) + automated npm publish on `v*` tags via Trusted Publishing (OIDC); 320 tests
+- ✅ CI (GitHub Actions matrix) + automated npm publish on `v*` tags via Trusted Publishing (OIDC); test counts are reported by pytest collection
 
 ## Known Issues
 
-None currently.
+- System-wide `/usr/local/bin` copies still need reinstall after the 2026-09-05 changes; sudo requires a password in this environment.
+- Codex/vendor concurrent refresh remains uncoordinated (no vendor lock). Staging cannot guarantee write-back against a later disk failure or crash; recovery data may need manual intervention.
+- macOS/Windows live behavior was not exercised locally. Without `fcntl`, refresh and cache writes are disabled.
 
 ## What's Left to Build
 

@@ -136,13 +136,21 @@ There are two paths:
 Both Claude and Codex rotate the refresh token, so write-back is mandatory —
 dropping the response strands the vendor CLI on a retired token.
 
-Refreshed tokens are written back to the vendor's own credential file via
-`write_json_secure()` (atomic, 0600) under `credential_lock()`. For Claude,
+Refreshed tokens are written back to the selected vendor credential file via
+`staged_json_write()` (unique 0600 temp, fsync, atomic replacement) under
+`credential_lock()`. Staging must succeed before exchanging a rotating token;
+failed locks must never authorize refresh. For Claude,
 `claude_refresh_lock()` additionally takes the CLI's own proper-lockfile
 directory `<config-dir>/.oauth_refresh.lock` (60s stale steal) so the two
 can't rotate concurrently. Tests must never touch the real files — the autouse
-`isolated_credentials` fixture in `tests/conftest.py` redirects
-`CLAUDE_CRED_PATHS` / `CODEX_AUTH_PATHS`.
+`isolated_credentials` fixture in `tests/conftest.py` redirects HOME and every
+import-time credential path, clears provider env vars, and stubs discovery
+commands. `no_network` rejects unmocked requests even if a caller catches them.
+Provider tests should mock `ensure_claude_token()` rather than its plain reader.
+
+The Python cache uses version 2 per-provider `{timestamp, data}` entries under
+`entries`. Read/merge/write is locked, and retained values keep their timestamps.
+The old global-timestamp format is invalidated, not migrated with a fresh age.
 
 ## Testing Checklist
 
@@ -161,7 +169,7 @@ Before publishing:
 4. **Z.AI**: 5h shared quota across GLM-4.7, GLM-4.6, GLM-4.5V, GLM-4.5, GLM-4.5-Air, and Visual Analysis
 5. **Codex API key mode**: No quota info (only OAuth has it)
 6. **Synthetic.new**: Reports three buckets — subscription (period requests), rolling 5h tokens, and weekly $ credits. Calls to `/quotas` don't count against any bucket
-7. **Windows**: Untested, may have path issues; `credential_lock()` degrades to no locking without `fcntl`
+7. **Windows**: Untested, may have path issues; without `fcntl`, credential refresh and Python cache writes are skipped rather than performed unlocked
 8. **macOS Claude credentials**: Keychain-stored tokens are read-only — cclimits won't write a refreshed token back into the Keychain, so expiry there still reports as expired
 9. **Codex has no shared lock**: `credential_lock()` only serializes cclimits against itself, and codex exposes no lock file (just an in-process mutex), so a simultaneous codex refresh is still possible. Claude is covered by `claude_refresh_lock()`
 10. **Grok credentials are read-only**: coding-credit usage comes from the official CLI's internal `/v1/billing?format=credits` endpoint. `~/.grok/auth.json` is read but never refreshed or written by cclimits, so an expired token reports as expired until `grok` is run. The endpoint requires the Grok session token plus `X-XAI-Token-Auth`, `x-userid`, `x-grok-client-version`, and `x-grok-client-mode` headers

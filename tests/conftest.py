@@ -4,8 +4,11 @@ Shared fixtures and mock data for cclimits tests.
 
 import json
 import os
+import socket
+import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta
 import pytest
@@ -25,24 +28,58 @@ def isolated_cache(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolated_credentials(tmp_path, monkeypatch):
-    """Keep tests away from the developer's real CLI credential files.
-
-    Token refresh reads — and on expiry writes and locks — ~/.claude and
-    ~/.codex.  A test that mocks only http_get would otherwise reach the real
-    files, so every test starts with those paths pointing at an empty temp
-    directory.  Tests that need credentials override these with their own.
-
-    ~/.grok is read-only for us (Grok has no refresh write-back), but a
-    developer who is logged into the Grok CLI would otherwise turn the gated
-    provider on mid-test and change which providers get fetched.
-    """
+    """Isolate both import-time paths and providers that discover HOME at runtime."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home / ".cache"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     cred_dir = tmp_path / "cli-credentials"
     monkeypatch.setattr(cclimits, "CLAUDE_CRED_PATHS", [cred_dir / ".credentials.json"])
     monkeypatch.setattr(cclimits, "CODEX_AUTH_PATHS", [cred_dir / "auth.json"])
     monkeypatch.setattr(cclimits, "GROK_AUTH_PATHS", [cred_dir / "grok-auth.json"])
     monkeypatch.setattr(cclimits, "GROK_MODELS_CACHE_PATHS", [cred_dir / "models-cache.json"])
-    for var in ("GROK_ACCESS_TOKEN", "GROK_CLIENT_VERSION"):
+    monkeypatch.setattr(cclimits, "ANTIGRAVITY_TOKEN_PATHS", [cred_dir / "agy-token.json"])
+    for var in (
+        "CLAUDE_ACCESS_TOKEN", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+        "GEMINI_OAUTH_CLIENT_ID", "GEMINI_OAUTH_CLIENT_SECRET",
+        "ZAI_API_KEY", "ZAI_KEY", "ZHIPU_API_KEY", "ZHIPUAI_API_KEY",
+        "OPENROUTER_API_KEY", "OPENROUTER_KEY", "MOONSHOT_API_KEY", "KIMI_API_KEY", "KIMI_KEY",
+        "ANTIGRAVITY_REFRESH_TOKEN", "ANTIGRAVITY_ACCESS_TOKEN",
+        "SYNTHETIC_API_KEY", "SYNTHETIC_KEY", "GROK_ACCESS_TOKEN", "GROK_CLIENT_VERSION",
+    ):
         monkeypatch.delenv(var, raising=False)
+    for var in list(os.environ):
+        if var.startswith("CCLIMITS_"):
+            monkeypatch.delenv(var, raising=False)
+
+    # Replace only the application's binding; shell-wrapper tests still need
+    # the real subprocess module to launch their isolated fake executables.
+    monkeypatch.setattr(cclimits, "subprocess", SimpleNamespace(
+        run=MagicMock(return_value=subprocess.CompletedProcess([], 1, "", "")),
+    ))
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """A forgotten HTTP mock must fail even if application code catches it."""
+    attempts = []
+
+    def blocked(*args, **kwargs):
+        attempts.append(True)
+        pytest.fail("Unmocked network access is forbidden in tests")
+
+    monkeypatch.setattr(socket.socket, "connect", blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked)
+    monkeypatch.setattr(socket, "create_connection", blocked)
+    monkeypatch.setattr(cclimits.urllib.request, "urlopen", blocked)
+    if cclimits.requests is not None:
+        monkeypatch.setattr(cclimits.requests.sessions.Session, "request", blocked)
+    yield
+    if attempts:
+        pytest.fail("Application attempted unmocked network access")
 
 
 @pytest.fixture

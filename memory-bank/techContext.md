@@ -16,7 +16,7 @@ cclimits/
 ├── bin/
 │   └── cclimits.js      # Node wrapper
 ├── lib/
-│   └── cclimits.py      # Main script (984 lines)
+│   └── cclimits.py      # Main Python script
 ├── memory-bank/         # AI context files
 ├── package.json         # npm config
 ├── README.md
@@ -31,7 +31,9 @@ cclimits/
 - **Node.js 16+**: Required for npx distribution
 
 ### Development
-- None currently (no tests, no build step)
+- `pytest` and `requests` from `requirements-dev.txt`; no build step
+- `python3 -m pytest tests/ -q` runs isolated tests, including tmux fake-executable tests
+- CI: Python 3.9/3.11/3.13 with requests and genuine urllib-only environments
 
 ## Commands
 
@@ -78,10 +80,8 @@ npm whoami
 # Publish (requires 2FA or automation token)
 npm publish
 
-# With automation token
-echo "//registry.npmjs.org/:_authToken=TOKEN" > .npmrc
-npm publish
-rm .npmrc
+# Automated publishing uses the v* tag workflow with npm Trusted Publishing.
+# Configure its repository/workflow identity in npm before publishing a fork.
 ```
 
 ## Related Projects

@@ -4,6 +4,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+import pytest
 
 
 WRAPPER = Path(__file__).parents[1] / "bin" / "cclimits-tmux"
@@ -42,6 +43,7 @@ def _run_wrapper(tmp_path: Path, cclimits: Path, *, args: str, grok: Path | None
         "CCLIMITS_BIN": str(cclimits),
         "CCLIMITS_TMUX_ARGS": args,
         "CCLIMITS_TMUX_TTL": "3600",
+        "GROK_BIN": str(tmp_path / "no-real-grok"),
     })
     if grok:
         env["GROK_BIN"] = str(grok)
@@ -235,6 +237,63 @@ fi
     )
 
 
+@pytest.mark.parametrize("before,after,expected", [
+    ("Claude: 40% (5h) ✅ | Grok: 22% (7d) ✅",
+     "Claude: ⏰ | Grok: 0% (7d) ✅",
+     "Claude: 40% (5h) ✅ | Grok: 0% (7d) ✅"),
+    ("Claude: 40% ✅ | Gemini: ( Flash 25% ✅ | Pro 50% ✅ ) | Grok: 22% ✅",
+     "Claude: 41% ✅ | Gemini: ❌ | Grok: 0% ✅",
+     "Claude: 41% ✅ | Gemini: ( Flash 25% ✅ | Pro 50% ✅ ) | Grok: 0% ✅"),
+    ("Claude: 40% ✅ | Gemini: ( Flash 25% ✅ | Pro 50% ✅ ) | Grok: 22% ✅",
+     "Claude: ⏰ | Gemini: ( Flash 26% ✅ | Pro 51% ✅ ) | Grok: 0% ✅",
+     "Claude: 40% ✅ | Gemini: ( Flash 26% ✅ | Pro 51% ✅ ) | Grok: 0% ✅"),
+    ("Claude: 99% 🔴 | Grok: 22% ✅",
+     "Claude: 100% ❌ | Grok: 0% ✅",
+     "Claude: 100% ❌ | Grok: 0% ✅"),
+    ("Claude: 40% ✅ | Grok: 22% ✅",
+     "Claude: 41% ✅ | Grok: 🔑",
+     "Claude: 41% ✅ | Grok: 🔑"),
+    ("Claude: \033[32m40%\033[0m | Grok: \033[32m22%\033[0m",
+     "Claude: \033[33mexpired\033[0m | Grok: \033[32m0%\033[0m",
+     "Claude: \033[32m40%\033[0m | Grok: \033[32m0%\033[0m"),
+    ("Claude:\033[32m40%\033[0m_Grok:\033[32m22%\033[0m",
+     "Claude:\033[33mexpired\033[0m_Grok:\033[32m0%\033[0m",
+     "Claude:\033[32m40%\033[0m_Grok:\033[32m0%\033[0m"),
+])
+def test_last_good_merge_supports_both_oneline_formats(tmp_path, before, after, expected):
+    state = tmp_path / "second"
+    cclimits = _write_executable(tmp_path / "fake-cclimits", f"""
+if [ -f '{state}' ]; then
+  printf '%s\\n' '{after}'
+else
+  printf '%s\\n' '{before}'
+fi
+""")
+    _run_wrapper(tmp_path, cclimits, args="--oneline both")
+    _wait_for_output(tmp_path, cclimits, args="--oneline both", expected=before)
+    state.touch()
+    for lease in tmp_path.glob("*.lease"):
+        lease.unlink()
+    _run_wrapper(tmp_path, cclimits, args="--oneline both")
+    _wait_for_output(tmp_path, cclimits, args="--oneline both", expected=expected)
+
+
+@pytest.mark.parametrize("expired", ["Grok: ⏰", "Grok: \033[33mexpired\033[0m", "\ueb72: ⏰"])
+def test_noncompact_grok_refresh(tmp_path, expired):
+    marker = tmp_path / "refreshed"
+    cclimits = _write_executable(tmp_path / "fake-cclimits", f"""
+if [ -f '{marker}' ]; then
+  printf '%s\\n' 'Grok: 0% (7d) ✅'
+else
+  printf '%s\\n' '{expired}'
+fi
+""")
+    grok = _write_executable(tmp_path / "fake-grok", f"[ \"$1\" = models ]\n: > '{marker}'\n")
+    _run_wrapper(tmp_path, cclimits, args="--grok --oneline", grok=grok)
+    _wait_for_output(tmp_path, cclimits, args="--grok --oneline", grok=grok,
+                     expected="Grok: 0% (7d) ✅")
+
+
 def _read_watch_lines(tmp_path: Path, cclimits: Path, count: int, **extra: str) -> list[str]:
     env = _clean_env()
     env.update({
@@ -243,6 +302,7 @@ def _read_watch_lines(tmp_path: Path, cclimits: Path, count: int, **extra: str) 
         "CCLIMITS_TMUX_ARGS": "--test",
         "CCLIMITS_TMUX_TTL": "3600",
         "CCLIMITS_TMUX_WATCH_INTERVAL": "0.05",
+        "GROK_BIN": str(tmp_path / "no-real-grok"),
     })
     env.update(extra)
     proc = subprocess.Popen(
@@ -317,13 +377,14 @@ def _watch_lines_after_corruption(wrapper: Path, tmp_path: Path, count: int,
     long-lived watcher keeps ticking after the file underneath it is replaced,
     and only the `"$0"` child invocations fail.
     """
-    env = os.environ.copy()
+    env = _clean_env()
     env.update({
         "TMPDIR": str(tmp_path),
         "CCLIMITS_BIN": str(tmp_path / "fake-cclimits"),
         "CCLIMITS_TMUX_ARGS": "--test",
         "CCLIMITS_TMUX_TTL": "3600",
         "CCLIMITS_TMUX_WATCH_INTERVAL": "0.05",
+        "GROK_BIN": str(tmp_path / "no-real-grok"),
     })
     env.update(extra)
     proc = subprocess.Popen(

@@ -7,7 +7,7 @@ Check quota/usage for AI coding CLI tools: Claude Code, OpenAI Codex, Google Gem
 ## Features
 
 - **Auto-discovers credentials** from standard locations
-- **Auto-refreshes expired tokens** (Gemini OAuth, Antigravity OAuth)
+- **Auto-refreshes expired tokens** (file-backed Claude/Codex, Gemini OAuth, Antigravity OAuth)
 - **Multiple output formats**: detailed, JSON, compact one-liner
 - **Caching support** for fast statusline integration
 - **Cross-platform**: macOS and Linux support
@@ -100,6 +100,25 @@ cclimits --oneline --icons   # Provider names as Nerd Font glyphs (needs a patch
 cclimits --oneline --cached        # Use cache if fresh (<60s)
 cclimits --oneline --cache-ttl 30  # Custom TTL in seconds
 ```
+
+### Cache Freshness
+
+The Python cache at `~/.cache/cclimits/usage.json` records a separate fetch
+timestamp for each provider. Partial runs, missing credentials, and transient
+failures preserve old readings without renewing their timestamps. A normal
+cache hit requires every selected entry to be within the TTL; the displayed
+cache age is the oldest selected entry.
+
+Transient failures can fall back to successful readings less than 24 hours old,
+with `stale_fallback` and `stale_age_seconds` in JSON and a stale notice in normal
+text output. Use `--no-stale-fallback` to disable substitution. Authentication
+errors do not qualify. Compact output still omits age notices to save space.
+
+Cache writes use a lock and unique private temporary files. The previous cache
+format is intentionally invalidated on upgrade because its single timestamp
+could have been renewed without fetching the retained data. This causes one
+fresh lookup, not a credential reset. The tmux wrapper's separate last-good
+display cache is unchanged and can retain an older reading during an outage.
 
 ## Example Output
 
@@ -425,6 +444,11 @@ providers from the same refresh still update. A missing credential (`no key`)
 is not transient and is accepted normally, so choosing not to log in replaces
 that provider's old reading without freezing the providers that do work.
 
+This works with both `--compact` (`_` separators) and normal `--oneline`
+(` | ` separators), including `--icons` and `--noemoji`. Gemini's internal tier
+separators stay inside its provider field. A numeric `100%` reading with a
+quota-exhausted icon is valid data, not a failed lookup.
+
 `cclimits` is resolved in this order: `$CCLIMITS_BIN`, then a sibling
 `../lib/cclimits.py` (when run from a git checkout), then `PATH`.
 
@@ -535,7 +559,10 @@ token the server has already retired.
 
 Details:
 
-- Writes are atomic and `0600`; every other field in the file is preserved.
+- Writes use unique `0600` temporary files and atomic replacement; every other
+  field in the file is preserved. Before exchanging a rotating token, cclimits
+  creates and syncs the staging file. Failure to acquire either required lock
+  or prepare that file skips refresh instead of proceeding unsafely.
 - Refresh + write is serialized across cclimits processes with a `.lock` file
   next to the credential file, and cclimits re-reads the file under that lock
   so it skips the refresh if someone else got there first.
@@ -547,7 +574,14 @@ Details:
 - codex exposes no equivalent lock file, so there the coordination is
   cclimits-vs-cclimits only.
 - macOS Keychain-stored Claude credentials are **read-only** here — cclimits
-  won't write to the Keychain, so expiry there still reports as expired.
+  won't write to the Keychain or refresh a different file-backed account, so
+  expiry there still reports as expired.
+- If writing or replacing the credential file fails after rotation, recovery
+  data is retained in a private temporary file and its path is reported on
+  stderr. A write failure can leave incomplete JSON; verify it before recovery.
+  Preparation cannot guarantee success against a later disk failure or crash.
+- On platforms without `fcntl`, Claude/Codex refresh and Python cache writes
+  are skipped. Live read-only usage checks still work.
 - Opt out with `CCLIMITS_NO_TOKEN_REFRESH=1` to restore the previous
   read-only behaviour.
 
@@ -604,6 +638,17 @@ export GEMINI_OAUTH_CLIENT_SECRET="..."
 - Python 3.9+
 - `requests` library (optional, falls back to urllib)
 - `bash`, `flock` (only for `cclimits-tmux`)
+
+## Development
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+python3 -m pytest tests/ -q
+```
+
+Tests isolate HOME, all provider credentials, and cclimits configuration, and
+block unmocked network access. tmux tests use fake executables only. See
+[`tests/README.md`](tests/README.md) for the genuine urllib-only test setup.
 
 ## License
 
