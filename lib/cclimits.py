@@ -45,7 +45,10 @@ GEMINI_TIERS = {
 
 ANTIGRAVITY_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 ANTIGRAVITY_CLIENT_SECRET = "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"
+# Match the CLI surface: the legacy desktop UA omits Argon's quota models.
+ANTIGRAVITY_USER_AGENT = "antigravity/cli/1.4.8"
 ANTIGRAVITY_ENDPOINTS = [
+    "https://daily-cloudcode-pa.googleapis.com",
     "https://cloudcode-pa.googleapis.com",
     "https://daily-cloudcode-pa.sandbox.googleapis.com",
     "https://autopush-cloudcode-pa.sandbox.googleapis.com",
@@ -1809,14 +1812,14 @@ def get_antigravity_usage() -> dict:
         load_url = f"{base_url}/v1internal:loadCodeAssist"
         fetch_url = f"{base_url}/v1internal:fetchAvailableModels"
 
-        load_headers = _antigravity_headers(access_token, "antigravity/windows/amd64")
+        load_headers = _antigravity_headers(access_token, ANTIGRAVITY_USER_AGENT)
         status, data = http_post(load_url, load_headers, {"metadata": {"ideType": "ANTIGRAVITY"}})
         if status == 401 and creds.get("refresh_token") and not refreshed_once:
             refreshed = refresh_antigravity_token(creds["refresh_token"])
             if refreshed and refreshed.get("access_token"):
                 access_token = refreshed["access_token"]
                 refreshed_once = True
-                load_headers = _antigravity_headers(access_token, "antigravity/windows/amd64")
+                load_headers = _antigravity_headers(access_token, ANTIGRAVITY_USER_AGENT)
                 status, data = http_post(load_url, load_headers, {"metadata": {"ideType": "ANTIGRAVITY"}})
         if status == 401:
             return {"error": "Authentication failed", "hint": "Run 'antigravity auth login' to refresh credentials"}
@@ -1837,14 +1840,14 @@ def get_antigravity_usage() -> dict:
         else:
             subscription_tier = "free"
 
-        fetch_headers = _antigravity_headers(access_token, "antigravity/1.11.5 windows/amd64")
+        fetch_headers = _antigravity_headers(access_token, ANTIGRAVITY_USER_AGENT)
         quota_status, quota_data = http_post(fetch_url, fetch_headers, {"project": project_id})
         if quota_status == 401 and creds.get("refresh_token") and not refreshed_once:
             refreshed = refresh_antigravity_token(creds["refresh_token"])
             if refreshed and refreshed.get("access_token"):
                 access_token = refreshed["access_token"]
                 refreshed_once = True
-                fetch_headers = _antigravity_headers(access_token, "antigravity/1.11.5 windows/amd64")
+                fetch_headers = _antigravity_headers(access_token, ANTIGRAVITY_USER_AGENT)
                 quota_status, quota_data = http_post(fetch_url, fetch_headers, {"project": project_id})
         if quota_status == 401:
             return {"error": "Authentication failed", "hint": "Run 'antigravity auth login' to refresh credentials"}
@@ -2310,17 +2313,15 @@ def print_section(name: str, data: dict):
         print(f"    Average:   {summary.get('avg_remaining_pct', 0)}% remaining")
         if "next_reset_in" in summary:
             print(f"    Next reset: {summary['next_reset_in']}")
-        print(f"\n    {'Model':<32} {'Remaining':>10}  Reset")
-        print(f"    {'-'*32} {'-'*10}  {'-'*16}")
         sorted_models = sorted(data["models"], key=lambda item: (item.get("remaining_pct", 0), item.get("name", "")))
-        for model in sorted_models[:10]:
-            name = str(model.get("name", "?"))[:32]
+        name_width = max([32] + [len(str(model.get("name", "?"))) for model in sorted_models])
+        print(f"\n    {'Model':<{name_width}} {'Remaining':>10}  Reset")
+        print(f"    {'-'*name_width} {'-'*10}  {'-'*16}")
+        for model in sorted_models:
+            name = str(model.get("name", "?"))
             remaining = model.get("remaining_pct", 0)
             reset = model.get("reset_time") or ""
-            print(f"    {name:<32} {remaining:>9}%  {reset}")
-        hidden_count = len(sorted_models) - 10
-        if hidden_count > 0:
-            print(f"    ... {hidden_count} more models hidden")
+            print(f"    {name:<{name_width}} {remaining:>9}%  {reset}")
 
     # Gemini tier quotas
     if isinstance(data.get("models"), dict):
@@ -2705,6 +2706,33 @@ def _render_gemini(data, window, use_color, show_resets=False):
 def _render_antigravity(data, window, use_color, show_resets=False):
     if not (data.get("status") == "ok" and "summary" in data):
         return None
+    if window == "both" and "models" in data:
+        # Fixed slots: Claude / Argon. Pair each reading with the
+        # tightest model's reset, rather than an unrelated model's earlier reset.
+        values, resets, percentages = [], [], []
+        argon_models = [m for m in data["models"] if m["name"].startswith("gemini-") and "-argon-" in m["name"]]
+        groups = [
+            [m for m in data["models"] if m["name"].startswith("claude-")],
+            argon_models,
+        ]
+        for models in groups:
+            if not models:
+                values.append("-")
+                resets.append(None)
+                continue
+            remaining = min(m["remaining_pct"] for m in models)
+            used = max(0, 100 - remaining)
+            values.append(f"{used:g}%")
+            percentages.append(used)
+            tightest = [m for m in models if m["remaining_pct"] == remaining]
+            reset = _earliest_antigravity_reset(tightest)
+            resets.append(format_reset_time(reset) if reset else None)
+        if not percentages:
+            return None
+        out = _fmt_single("Antigravity", "/".join(values), max(percentages), "", use_color)
+        if show_resets and (suf := _reset_suffix(*resets)):
+            out += f" {suf}"
+        return out
     s = data["summary"]
     used = max(0, 100 - int(s.get("min_remaining_pct", 0)))
     mc = int(s.get("model_count", 0))
@@ -2738,7 +2766,7 @@ def _render_grok(data, window, use_color, show_resets=False):
 # without decoding the file:
 #     Claude       U+EC82  cod-claude          Codex   U+EC81  cod-openai
 #     Grok         U+EB72  cod-twitter         Gemini  U+F0AE2 md-star_four_points
-#     Antigravity  U+F14DE md-rocket_launch    Z.AI    U+F0C37 md-alpha_z_circle
+#     Antigravity  U+F02AD md-google           Z.AI    U+F0C37 md-alpha_z_circle
 #     Kimi         U+F0C0A md-alpha_k_circle   OpenRouter U+F11E2 md-router
 #     Synthetic    U+F0093 md-flask
 # Every provider needs one: a half-populated table would render a line that is
@@ -2776,7 +2804,7 @@ PROVIDERS = [
      "gated": True, "creds": "get_kimi_credentials", "oneline_order": 6,
      "render_oneline": _make_balance_renderer("Kimi", "balance", lambda d: (d["balance"], f"{'$' if d.get('currency', 'USD') == 'USD' else '¥'}{d['balance']:.2f}"))},
     {"key": "antigravity", "title": "Google Antigravity", "oneline_label": "Antigravity",
-     "oneline_icon": "\U000f14de",
+     "oneline_icon": "\U000f02ad",
      "arg_help": "Only check Google Antigravity", "fetch": "get_antigravity_usage",
      "gated": True, "creds": "get_antigravity_credentials", "oneline_order": 7,
      "render_oneline": _render_antigravity},

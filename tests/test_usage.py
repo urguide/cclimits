@@ -369,6 +369,29 @@ class TestGetGeminiUsage:
 class TestGetAntigravityUsage:
     """Tests for Antigravity usage retrieval."""
 
+    def test_cli_surface_exposes_argon_in_usage_and_detailed_output(self, monkeypatch, capsys):
+        from cclimits import print_section
+
+        monkeypatch.setattr("cclimits.get_antigravity_credentials", lambda: {"access_token": "test-token"})
+
+        def post(url, headers, body):
+            assert headers["User-Agent"].startswith("antigravity/cli/")
+            if url.endswith(":loadCodeAssist"):
+                return 200, {"cloudaicompanionProject": "test-project"}
+            assert url.endswith(":fetchAvailableModels")
+            assert body["project"] == "test-project"
+            return 200, {"models": {"gemini-4-argon-high": {
+                "quotaInfo": {"remainingFraction": 0.38, "resetTime": "2030-01-04T00:00:00Z"}
+            }}}
+
+        monkeypatch.setattr("cclimits.http_post", post)
+        result = get_antigravity_usage()
+        assert result["models"][0]["remaining_pct"] == 38
+        print_section("Google Antigravity", result)
+        output = capsys.readouterr().out
+        assert "gemini-4-argon-high" in output
+        assert "38%" in output
+
     def test_normalize_models_sorts_by_remaining_quota(self):
         """Test Antigravity model normalization and tightest-first sorting."""
         result = _normalize_antigravity_models({

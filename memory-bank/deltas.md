@@ -1,5 +1,14 @@
 # Recent Deltas (Last 3-5 Changes)
 
+## 2026-10-28: Google Family Quotas and Full Model Listing
+
+- Final display preference: `--oneline both` uses fixed **Claude / Argon** slots, omitting general Gemini usage from the status line. Detailed/JSON model lists remain complete.
+- Added a third Argon slot (Gemini / Claude / Argon), excluding Argon from the first slot. cclimits fetches Argon directly with the same two API calls; no agy subprocess. Matched agy 1.4.8's CLI User-Agent (`antigravity/cli/1.4.8`) and daily endpoint: legacy desktop identity silently omitted Argon. Live API output and `agy -p /usage` both reported 38% remaining and the same weekly reset.
+- Antigravity `--oneline both` now displays Google (Gemini) / Claude usage and their corresponding reset countdowns. Each family selects its tightest quota; missing families retain a `-` slot. Other model families are excluded from this view.
+- The Antigravity Nerd Font icon is Google's G (`U+F02AD`, `md-google`). Detailed output lists every model and expands the name column instead of truncating names or hiding rows after ten.
+- Local CLI and tmux use `~/.local/bin/cclimits` through an explicit `CCLIMITS_BIN`; system-wide installation requires interactive sudo.
+- Verification: usage, output and tmux wrapper tests passed (181 tests), including CLI-surface API retrieval, separate Argon usage/reset, family/reset pairing and missing-family slots. Live compact output: `󰊭:1%/27%/62%(2h/4h/3d)`.
+
 ## 2026-09-05: Review Fixes for Credential Safety and Cache Correctness
 
 - Isolated HOME, all import-time credential paths and provider environment variables in pytest. Stubbed credential-discovery commands; blocked unmocked requests/urllib/socket connections. Every wrapper test now uses a fake or nonexistent Grok executable, including watch/corruption helpers.

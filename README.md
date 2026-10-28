@@ -172,7 +172,7 @@ is strictly worse than the word it replaced.
 | Codex | `` | `U+EC81` | `cod-openai` |
 | Grok | `` | `U+EB72` | `cod-twitter` |
 | Gemini | `󰫢` | `U+F0AE2` | `md-star_four_points` |
-| Antigravity | `󱓞` | `U+F14DE` | `md-rocket_launch` |
+| Antigravity | `󰊭` | `U+F02AD` | `md-google` |
 | Z.AI | `󰰷` | `U+F0C37` | `md-alpha_z_circle` |
 | Kimi | `󰰊` | `U+F0C0A` | `md-alpha_k_circle` |
 | OpenRouter | `󱇢` | `U+F11E2` | `md-router` |
@@ -186,6 +186,19 @@ printf 'claude=\uec82 openai=\uec81 twitter=\ueb72\n'
 
 Grok's credit period is supplied by xAI and may be weekly or monthly. Example:
 `Grok: 55% (7d) ✅ ↻6d4h`.
+
+Antigravity's `--oneline both` shows **Claude / Argon** model-family
+usage, with reset countdowns in the same order. For example,
+`--antigravity --oneline both --compact --resets --icons` produces
+`󰊭:27%/62%(4h/3d)`. General Gemini quotas are omitted from this view.
+Each family uses its tightest model quota and that model's
+reset (earliest reset among equally tight models). Other models are excluded;
+a missing family is shown as `-`. Single-window output keeps the all-model summary.
+The detailed Antigravity table lists every model with its full name, remaining
+quota and reset timestamp; it does not truncate the list or model names.
+Both outputs and JSON read the same model quotas directly from Google's API.
+The request uses the current Antigravity CLI client identity so the API includes
+Argon; no `agy` subprocess is needed to fetch usage.
 
 ### Detailed Output (default)
 

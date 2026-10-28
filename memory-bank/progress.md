@@ -26,7 +26,7 @@
 - ✅ Cross-platform credential detection (macOS/Linux)
 - ✅ npm package published as `cclimits`
 - ✅ Gemini models grouped by quota tier (3-Flash, Flash, Pro)
-- ✅ Antigravity models sorted by tightest remaining quota with min/avg summary; compact oneline displays tightest model usage percentage
+- ✅ Antigravity detailed output lists all full model names, remaining quotas and resets; `--oneline both` shows fixed Claude / Argon family slots with paired resets and a Google G icon. General Gemini usage is omitted from this view. Direct requests use the CLI client identity to include Argon. Single-window mode retains the all-model summary.
 - ✅ Research on additional providers completed (`research/ai-coding-providers.md`)
 - ✅ Providers fetched concurrently; cache hits skip all network/credential calls; transient failures fall back to <24h-old cached data with stale marker (v1.3.0)
 - ✅ Data-driven `PROVIDERS` registry — adding a provider is one registry entry + one fetch function

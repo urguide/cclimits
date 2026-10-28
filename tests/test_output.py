@@ -14,6 +14,55 @@ from cclimits import (
 )
 
 
+class TestAntigravityGroups:
+    def test_argon_has_separate_usage_and_reset(self, capsys):
+        models = [
+            {"name": "gemini-3.8-flash-high", "remaining_pct": 99, "reset_time": "2030-01-01T02:00:00Z"},
+            {"name": "claude-opus-5-5-high", "remaining_pct": 73, "reset_time": "2030-01-01T04:00:00Z"},
+            {"name": "gemini-4-argon-high", "remaining_pct": 38, "reset_time": "2030-01-04T00:00:00Z"},
+            {"name": "gemini-4-argon-low", "remaining_pct": 38, "reset_time": "2030-01-04T00:00:00Z"},
+        ]
+        countdowns = {models[0]["reset_time"]: "2h", models[1]["reset_time"]: "4h",
+                      models[2]["reset_time"]: "3d"}
+        with patch("cclimits.format_reset_time", side_effect=countdowns.__getitem__):
+            print_oneline({"antigravity": {"status": "ok", "summary": {}, "models": models}},
+                          "both", compact=True, icons=True, show_resets=True)
+        assert capsys.readouterr().out.strip() == "\U000f02ad:27%/62%(4h/3d)"
+
+    def test_tightest_family_usage_keeps_its_own_reset(self, capsys):
+        models = [
+            {"name": "claude-opus", "remaining_pct": 50, "reset_time": "google-reset"},
+            {"name": "claude-sonnet", "remaining_pct": 99, "reset_time": "earlier-reset"},
+            {"name": "gemini-4-argon-high", "remaining_pct": 91, "reset_time": "claude-reset"},
+            {"name": "gemini-flash", "remaining_pct": 99, "reset_time": "earlier-reset"},
+            {"name": "gpt-oss-120b", "remaining_pct": 0, "reset_time": "earlier-reset"},
+        ]
+        # Use actual ISO timestamps for selection, fixed countdowns for display.
+        timestamps = {
+            "google-reset": "2030-01-05T00:00:00Z",
+            "claude-reset": "2030-01-01T03:00:00Z",
+            "earlier-reset": "2030-01-01T01:00:00Z",
+        }
+        for model in models:
+            model["reset_time"] = timestamps[model["reset_time"]]
+        countdowns = dict(zip(timestamps.values(), ("4d 1h", "2h 1m", "1h")))
+        with patch("cclimits.format_reset_time", side_effect=countdowns.__getitem__):
+            print_oneline({"antigravity": {"status": "ok", "summary": {}, "models": models}},
+                          "both", compact=True, icons=True, show_resets=True)
+        assert capsys.readouterr().out.strip() == "\U000f02ad:50%/9%(5d/3h)"
+
+    @pytest.mark.parametrize("name,expected", [
+        ("claude-opus", "Antigravity:28%/-(3h/-)"),
+        ("gemini-4-argon-high", "Antigravity:-/28%(-/3h)"),
+    ])
+    def test_missing_family_keeps_positional_slot(self, name, expected, capsys):
+        models = [{"name": name, "remaining_pct": 72, "reset_time": "2030-01-01T03:00:00Z"}]
+        with patch("cclimits.format_reset_time", return_value="2h 1m"):
+            print_oneline({"antigravity": {"status": "ok", "summary": {}, "models": models}},
+                          "both", compact=True, show_resets=True)
+        assert capsys.readouterr().out.strip() == expected
+
+
 class TestPrintSection:
     """Tests for print_section() function."""
 
