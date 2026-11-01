@@ -57,6 +57,8 @@ ANTIGRAVITY_TOKEN_PATHS = [
     Path.home() / ".gemini" / "antigravity-cli" / "antigravity-oauth-token",
     Path.home() / ".config" / "antigravity-cli" / "antigravity-oauth-token",
 ]
+ANTIGRAVITY_KEYRING_SERVICE = "gemini"
+ANTIGRAVITY_KEYRING_ACCOUNT = "antigravity"
 
 COLORS = {
     'green': '\033[32m',
@@ -1654,26 +1656,71 @@ def get_kimi_usage() -> dict:
         return {"error": f"API error ({status})", "details": str(data)}
 
 
-def _read_antigravity_token_file() -> dict | None:
-    """Read tokens from the Antigravity CLI's on-disk credentials file.
+def _parse_antigravity_token_payload(raw: str) -> dict | None:
+    """Parse Antigravity CLI token JSON from on-disk file or OS keyring.
 
-    File shape: {"token": {"access_token", "refresh_token", "expiry"}, "auth_method": "..."}
+    Shape: {"token": {"access_token", "refresh_token", "expiry"}, "auth_method": "..."}
     where expiry is an RFC3339 timestamp written by the Go CLI.
     """
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None
+        tok = data.get("token")
+        if not isinstance(tok, dict):
+            tok = data
+        if tok.get("refresh_token") or tok.get("access_token"):
+            return {
+                "access_token": tok.get("access_token"),
+                "refresh_token": tok.get("refresh_token"),
+                "expiry": tok.get("expiry"),
+            }
+    except Exception:
+        return None
+    return None
+
+
+def _read_antigravity_token_file() -> dict | None:
+    """Read tokens from the Antigravity CLI's on-disk credentials file."""
     for path in ANTIGRAVITY_TOKEN_PATHS:
         if not path.exists():
             continue
         try:
-            data = json.loads(path.read_text())
-            tok = data.get("token") or {}
-            if tok.get("refresh_token") or tok.get("access_token"):
-                return {
-                    "access_token": tok.get("access_token"),
-                    "refresh_token": tok.get("refresh_token"),
-                    "expiry": tok.get("expiry"),
-                }
+            if parsed := _parse_antigravity_token_payload(path.read_text()):
+                return parsed
         except Exception:
             continue
+    return None
+
+
+def _read_antigravity_keyring() -> dict | None:
+    """Read tokens from the OS keyring where `agy` stores them via go-keyring."""
+    try:
+        if sys.platform == "darwin":
+            res = subprocess.run(
+                [
+                    "security", "find-generic-password",
+                    "-s", ANTIGRAVITY_KEYRING_SERVICE,
+                    "-a", ANTIGRAVITY_KEYRING_ACCOUNT,
+                    "-w",
+                ],
+                capture_output=True, text=True, timeout=5,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return _parse_antigravity_token_payload(res.stdout.strip())
+        elif sys.platform.startswith("linux"):
+            res = subprocess.run(
+                [
+                    "secret-tool", "lookup",
+                    "service", ANTIGRAVITY_KEYRING_SERVICE,
+                    "username", ANTIGRAVITY_KEYRING_ACCOUNT,
+                ],
+                capture_output=True, text=True, timeout=5,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return _parse_antigravity_token_payload(res.stdout.strip())
+    except Exception:
+        pass
     return None
 
 
@@ -1702,7 +1749,7 @@ def refresh_antigravity_token(refresh_token: str) -> dict | None:
 
 
 def get_antigravity_credentials() -> dict | None:
-    """Get Antigravity OAuth tokens from the CLI's on-disk file or env vars."""
+    """Get Antigravity OAuth tokens from the CLI's on-disk file, OS keyring, or env vars."""
     result = {}
 
     if file_creds := _read_antigravity_token_file():
@@ -1714,6 +1761,17 @@ def get_antigravity_credentials() -> dict | None:
             result["expiry"] = file_creds["expiry"]
         if result:
             result["source"] = "file"
+
+    if not result:
+        if keyring_creds := _read_antigravity_keyring():
+            if keyring_creds.get("refresh_token"):
+                result["refresh_token"] = keyring_creds["refresh_token"]
+            if keyring_creds.get("access_token"):
+                result["access_token"] = keyring_creds["access_token"]
+            if keyring_creds.get("expiry"):
+                result["expiry"] = keyring_creds["expiry"]
+            if result:
+                result["source"] = "keyring"
 
     if not result:
         if refresh := os.environ.get("ANTIGRAVITY_REFRESH_TOKEN"):

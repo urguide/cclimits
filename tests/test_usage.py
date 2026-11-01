@@ -4,6 +4,7 @@ Tests for API usage functions (mock both credentials and HTTP).
 
 import base64
 import json
+import subprocess
 import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock, call
@@ -483,6 +484,29 @@ class TestGetAntigravityUsage:
         assert creds["source"] == "file"
         assert creds["access_token"] == "ya29.test-access"
         assert creds["refresh_token"] == "1//test-refresh"
+
+    def test_credentials_from_keyring(self, monkeypatch):
+        """get_antigravity_credentials reads from the OS keyring when no file exists."""
+        payload = json.dumps({
+            "token": {
+                "access_token": "ya29.keyring-access",
+                "refresh_token": "1//keyring-refresh",
+                "expiry": "2030-01-01T00:00:00Z",
+            },
+            "auth_method": "consumer",
+        })
+        monkeypatch.setattr("cclimits.sys.platform", "linux")
+        monkeypatch.setattr(
+            "cclimits.subprocess.run",
+            MagicMock(return_value=subprocess.CompletedProcess([], 0, payload, "")),
+        )
+
+        creds = get_antigravity_credentials()
+
+        assert creds is not None
+        assert creds["source"] == "keyring"
+        assert creds["access_token"] == "ya29.keyring-access"
+        assert creds["refresh_token"] == "1//keyring-refresh"
 
 
 class TestGetZaiUsage:
